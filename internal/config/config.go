@@ -18,6 +18,10 @@ type Config struct {
 	// RenderURL is the public base URL of the service (e.g. on Render.com).
 	// Used to construct WebApp deep-links sent to users.
 	RenderURL string
+	// WebAppURL is the explicit Mini App URL.
+	WebAppURL string
+	// CryptoBotToken is the API token for @CryptoBot payment integration.
+	CryptoBotToken string
 	// DatabasePath is the filesystem path for the SQLite database file.
 	DatabasePath string
 }
@@ -29,11 +33,13 @@ const defaultDB = "./data/bot.db"
 // Only BOT_TOKEN is strictly required; everything else has a safe default.
 func Load() (*Config, error) {
 	cfg := &Config{
-		BotToken:     os.Getenv("BOT_TOKEN"),
-		Port:         os.Getenv("PORT"),
-		WebhookURL:   os.Getenv("WEBHOOK_URL"),
-		RenderURL:    coalesce("RENDER_EXTERNAL_URL", "RENDER_URL"),
-		DatabasePath: os.Getenv("DATABASE_PATH"),
+		BotToken:       os.Getenv("BOT_TOKEN"),
+		Port:           os.Getenv("PORT"),
+		WebhookURL:     os.Getenv("WEBHOOK_URL"),
+		RenderURL:      coalesce("RENDER_EXTERNAL_URL", "RENDER_URL"),
+		WebAppURL:      os.Getenv("WEBAPP_URL"),
+		CryptoBotToken: os.Getenv("CRYPTOBOT_TOKEN"),
+		DatabasePath:   os.Getenv("DATABASE_PATH"),
 	}
 
 	if cfg.BotToken == "" {

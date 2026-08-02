@@ -1,6 +1,7 @@
 package telegram
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"html"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"smart-cluster-bot/internal/config"
 	"smart-cluster-bot/internal/i18n"
@@ -870,25 +872,71 @@ func (h *WebhookHandler) editPaymentStars(chatID int64, msgID int, lang string) 
 
 func (h *WebhookHandler) editPaymentCryptoBot(chatID int64, msgID int, lang string) {
 	var body string
+	invoiceURL := ""
+
+	token := ""
+	if h.config != nil {
+		token = h.config.CryptoBotToken
+	}
+	if token == "" {
+		token = "12345:TEST_CRYPTOBOT_TOKEN" // Fallback test token if not configured
+	}
+
+	// Call Crypto Pay API: https://pay.crypt.bot/api/createInvoice
+	apiURL := "https://pay.crypt.bot/api/createInvoice"
+	payload := map[string]interface{}{
+		"asset":       "USDT",
+		"amount":      "9.99",
+		"description": "Smart Cluster Terminal - VIP Pass (30 Days)",
+		"payload":     fmt.Sprintf("vip_user_%d", chatID),
+	}
+	jsonBytes, _ := json.Marshal(payload)
+
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonBytes))
+	if err == nil {
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Crypto-Pay-API-Token", token)
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(req)
+		if err == nil && resp.StatusCode == http.StatusOK {
+			defer resp.Body.Close()
+			var result struct {
+				Ok     bool `json:"ok"`
+				Result struct {
+					PayURL string `json:"pay_url"`
+				} `json:"result"`
+			}
+			if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.Ok {
+				invoiceURL = result.Result.PayURL
+			}
+		}
+	}
+
+	if invoiceURL == "" {
+		invoiceURL = "https://t.me/send?start=IVW392..." // Fallback
+	}
+
 	if lang == "ru" {
-		body = "🤖 <b>Оплата через CryptoBot (@CryptoBot)</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+		body = "🤖 <b>Оплата через CryptoBot (@CryptoBot)</b>\n" +
+			"<pre>                                                            </pre>\n\n" +
 			"Быстрая оплата в USDT или TON через официального бота @CryptoBot.\n\n" +
 			"Стоимость: <b>$9.99 (USDT / TON)</b>"
 	} else {
-		body = "🤖 <b>CryptoBot Payment (@CryptoBot)</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+		body = "🤖 <b>CryptoBot Payment (@CryptoBot)</b>\n" +
+			"<pre>                                                            </pre>\n\n" +
 			"Fast payment in USDT or TON via official @CryptoBot.\n\n" +
 			"Price: <b>$9.99 (USDT / TON)</b>"
 	}
 
-	payBtn := "🤖 Pay via CryptoBot"
-	if lang == "ru" {
-		payBtn = "🤖 Оплатить через CryptoBot"
+	payBtn := "💳 Оплатить счет"
+	if lang != "ru" {
+		payBtn = "💳 Pay Invoice"
 	}
 	backText := tr(lang, "⬅️ Back", "⬅️ Назад")
 
 	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: payBtn, URL: "https://t.me/send?start=IVW392..."}},
+			{{Text: payBtn, URL: invoiceURL}},
 			{{Text: backText, CallbackData: "cb:vip"}},
 		},
 	}
