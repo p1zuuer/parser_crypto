@@ -188,15 +188,13 @@ func (s *Storage) GetOrCreateUser(userID int64, username, lang string) (*User, e
 	}
 	u.CreatedAt = parseTime(createdStr)
 
-	// Keep username/language fresh.
-	if u.Username != username || u.Language != lang {
+	if u.Username != username {
 		u.Username = username
-		u.Language = lang
 		if _, err := s.db.Exec(
-			`UPDATE users SET username = ?, language = ? WHERE user_id = ?`,
-			username, lang, userID,
+			`UPDATE users SET username = ? WHERE user_id = ?`,
+			username, userID,
 		); err != nil {
-			return nil, fmt.Errorf("storage: update user %d: %w", userID, err)
+			return nil, fmt.Errorf("storage: update username %d: %w", userID, err)
 		}
 	}
 	return u, nil

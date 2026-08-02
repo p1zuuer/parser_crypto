@@ -7,6 +7,7 @@ import (
 	"html"
 	"log"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -68,17 +69,12 @@ func (h *WebhookHandler) dispatch(u *Update) {
 func (h *WebhookHandler) handleMessage(msg *Message) {
 	chatID := msg.Chat.ID
 	from := msg.From
-	lang := from.LanguageCode
-	if lang == "" {
-		lang = "en"
+	bootstrapLang := "en"
+	if strings.HasPrefix(strings.ToLower(from.LanguageCode), "ru") {
+		bootstrapLang = "ru"
 	}
-	if strings.HasPrefix(strings.ToLower(lang), "ru") {
-		lang = "ru"
-	} else {
-		lang = "en" // Default to English as required
-	}
-
-	user, err := h.storage.GetOrCreateUser(from.ID, from.Username, lang)
+	user, err := h.storage.GetOrCreateUser(from.ID, from.Username, bootstrapLang)
+	// Use user.Language for the rest of the function.
 	if err != nil {
 		log.Printf("[HANDLER] GetOrCreateUser %d: %v", from.ID, err)
 		return
@@ -443,16 +439,16 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 	_ = h.client.AnswerCallbackQuery(cb.ID, "")
 
 	// Fetch user to know their language preference
-	lang := cb.From.LanguageCode
-	if lang == "" {
-		lang = "en"
+	bootstrapLang := "en"
+	if strings.HasPrefix(strings.ToLower(cb.From.LanguageCode), "ru") {
+		bootstrapLang = "ru"
 	}
-	if strings.HasPrefix(strings.ToLower(lang), "ru") {
-		lang = "ru"
-	} else {
-		lang = "en"
+	user, err := h.storage.GetOrCreateUser(userID, cb.From.Username, bootstrapLang)
+	// Use user.Language for the rest of the function.
+	if err != nil {
+		log.Printf("[HANDLER] GetOrCreateUser callback %d: %v", userID, err)
+		return
 	}
-	user, _ := h.storage.GetOrCreateUser(userID, cb.From.Username, lang)
 	currentLang := user.Language
 
 	switch {
@@ -521,55 +517,12 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 // ── Edit-in-place helpers ──────────────────────────────────────────────────────
 
 func (h *WebhookHandler) editStartMenu(chatID int64, msgID int, firstName string, user *storage.User) {
-	plan := "FREE"
-	if user.IsVIP {
-		plan = "👑 VIP"
-	}
-	lang := user.Language
-	var body string
-	if lang == "ru" {
-		body = fmt.Sprintf(
-			"👋 <b>Привет, %s!</b>\n\n"+
-				"📊 <b>Smart Cluster Terminal</b>\n\n"+
-				"👤 План: <b>%s</b>\n"+
-				"🔔 Мин. объём: <b>$%s</b>\n"+
-				"🌐 Сети: %s\n"+
-				"🌐 Язык: <b>Русский (RU)</b>\n\nВыберите действие:",
-			html.EscapeString(firstName), html.EscapeString(plan),
-			fmtVolume(user.MinVolume), enabledNetworks(user),
-		)
-	} else {
-		body = fmt.Sprintf(
-			"👋 <b>Hello, %s!</b>\n\n"+
-				"📊 <b>Smart Cluster Terminal</b>\n\n"+
-				"👤 Plan: <b>%s</b>\n"+
-				"🔔 Min Volume: <b>$%s</b>\n"+
-				"🌐 Networks: %s\n"+
-				"🌐 Language: <b>English (EN)</b>\n\nChoose an action:",
-			html.EscapeString(firstName), html.EscapeString(plan),
-			fmtVolume(user.MinVolume), enabledNetworks(user),
-		)
-	}
+	h.sendStartMenu(chatID, firstName, user)
+}
 
-	kb := &InlineKeyboardMarkup{
-		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: tr(lang, "📊 Open Terminal", "📊 Открыть Terminal"), WebApp: &WebAppInfo{URL: h.webAppURL()}}},
-			{
-				{Text: tr(lang, "🔥 Fresh Clusters", "🔥 Свежие кластеры"), CallbackData: "cb:clusters"},
-				{Text: "📈 24h Stats", CallbackData: "cb:stats"},
-			},
-			{
-				{Text: tr(lang, "⭐ My Watchlist", "⭐ Мой Watchlist"), CallbackData: "cb:watchlist"},
-				{Text: tr(lang, "⚙️ Settings", "⚙️ Настройки"), CallbackData: "cb:settings"},
-			},
-			{
-				{Text: tr(lang, "🔥 Hot Wallets", "🔥 Горячие кошельки"), CallbackData: "cb:hot"},
-				{Text: tr(lang, "❓ Help", "❓ Помощь"), CallbackData: "cb:help"},
-			},
-			{{Text: tr(lang, "👑 VIP Pass", "👑 VIP Пасс"), CallbackData: "cb:vip"}},
-		},
-	}
-	h.client.EditMessageText(chatID, msgID, body, kb)
+func wideText(body string) string {
+	const spacer = "<pre>                                                            </pre>\n"
+	return spacer + body
 }
 
 func (h *WebhookHandler) editRecentClusters(chatID int64, msgID int, lang string) {
@@ -871,51 +824,12 @@ func (h *WebhookHandler) editPaymentStars(chatID int64, msgID int, lang string) 
 }
 
 func (h *WebhookHandler) editPaymentCryptoBot(chatID int64, msgID int, lang string) {
-	var body string
-	invoiceURL := ""
-
-	token := ""
-	if h.config != nil {
-		token = h.config.CryptoBotToken
-	}
-	if token == "" {
-		token = "12345:TEST_CRYPTOBOT_TOKEN" // Fallback test token if not configured
-	}
-
-	// Call Crypto Pay API: https://pay.crypt.bot/api/createInvoice
-	apiURL := "https://pay.crypt.bot/api/createInvoice"
-	payload := map[string]interface{}{
-		"asset":       "USDT",
-		"amount":      "9.99",
-		"description": "Smart Cluster Terminal - VIP Pass (30 Days)",
-		"payload":     fmt.Sprintf("vip_user_%d", chatID),
-	}
-	jsonBytes, _ := json.Marshal(payload)
-
-	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(jsonBytes))
-	if err == nil {
-		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("Crypto-Pay-API-Token", token)
-		client := &http.Client{Timeout: 5 * time.Second}
-		resp, err := client.Do(req)
-		if err == nil && resp.StatusCode == http.StatusOK {
-			defer resp.Body.Close()
-			var result struct {
-				Ok     bool `json:"ok"`
-				Result struct {
-					PayURL string `json:"pay_url"`
-				} `json:"result"`
-			}
-			if err := json.NewDecoder(resp.Body).Decode(&result); err == nil && result.Ok {
-				invoiceURL = result.Result.PayURL
-			}
-		}
-	}
-
+	invoiceURL, _ := h.createCryptoBotInvoice(chatID)
 	if invoiceURL == "" {
 		invoiceURL = "https://t.me/send?start=IVW392..." // Fallback
 	}
 
+	var body string
 	if lang == "ru" {
 		body = "🤖 <b>Оплата через CryptoBot (@CryptoBot)</b>\n" +
 			"<pre>                                                            </pre>\n\n" +
@@ -1058,6 +972,41 @@ func (h *WebhookHandler) editHelp(chatID int64, msgID int, lang string) {
 	}
 
 	h.client.EditMessageText(chatID, msgID, body, backToMenuKB(lang))
+}
+
+func (h *WebhookHandler) createCryptoBotInvoice(userID int64) (string, error) {
+	token := ""
+	if h.config != nil {
+		token = h.config.CryptoBotToken
+	}
+	if token == "" {
+		token = os.Getenv("CRYPTOBOT_TOKEN")
+	}
+	if token == "" {
+		return "", fmt.Errorf("CRYPTOBOT_TOKEN not configured")
+	}
+
+	payload := map[string]interface{}{
+		"asset": "USDT", "amount": "9.99",
+		"description": "Smart Cluster Terminal — VIP Pass",
+		"payload":     fmt.Sprintf("vip_%d_%d", userID, time.Now().Unix()),
+	}
+	jsonBytes, _ := json.Marshal(payload)
+	req, _ := http.NewRequest(http.MethodPost, "https://pay.crypt.bot/api/createInvoice", bytes.NewBuffer(jsonBytes))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Crypto-Pay-API-Token", token)
+
+	resp, _ := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	defer resp.Body.Close()
+
+	var result struct {
+		Ok     bool `json:"ok"`
+		Result struct {
+			PayURL string `json:"pay_url"`
+		} `json:"result"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result)
+	return result.Result.PayURL, nil
 }
 
 // ── URL helpers ────────────────────────────────────────────────────────────────
