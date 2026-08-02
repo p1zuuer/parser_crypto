@@ -1,139 +1,704 @@
 <!DOCTYPE html>
-<html lang="en" class="dark">
+<html lang="en">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Smart Cluster Bot - WebApp</title>
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script>
-        tailwind.config = {
-            darkMode: 'class',
-            theme: {
-                extend: {
-                    colors: {
-                        dark: {
-                            bg: '#0f172a',
-                            card: '#1e293b',
-                            border: '#334155',
-                            text: '#f8fafc',
-                            muted: '#94a3b8'
-                        }
-                    }
-                }
-            }
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>Smart Cluster Terminal</title>
+
+  <!-- Fonts: Inter (UI) + JetBrains Mono (data) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- Telegram WebApp SDK -->
+  <script src="https://telegram.org/js/telegram-web-app.js"></script>
+
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          fontFamily: {
+            sans: ['Inter', 'system-ui', 'sans-serif'],
+            mono: ['JetBrains Mono', 'monospace'],
+          },
+          colors: {
+            obsidian: '#0B0E14',
+            graphite: '#131722',
+            panel:    '#161B27',
+            border:   '#1E2736',
+            emerald:  { DEFAULT: '#00F5A0', dim: '#00C07A', glow: 'rgba(0,245,160,0.15)' },
+            amber:    { DEFAULT: '#F59E0B', dim: '#B97A08', glow: 'rgba(245,158,11,0.15)' },
+            slate:    { 400: '#94A3B8', 500: '#64748B', 600: '#475569', 700: '#334155', 800: '#1E293B' },
+            text:     { primary: '#E2E8F0', muted: '#64748B', dim: '#334155' },
+            eth:      '#627EEA',
+            sol:      '#14F195',
+            base:     '#0052FF',
+            bsc:      '#F3BA2F',
+          },
         }
-    </script>
+      }
+    }
+  </script>
+
+  <style>
+    /* ── Base ─────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; }
+
+    html, body {
+      background-color: #0B0E14;
+      color: #E2E8F0;
+      font-family: 'Inter', system-ui, sans-serif;
+      min-height: 100dvh;
+      overscroll-behavior: none;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    /* ── Scanline CRT overlay (signature element) ─────────── */
+    body::before {
+      content: '';
+      position: fixed;
+      inset: 0;
+      background-image: repeating-linear-gradient(
+        0deg,
+        transparent,
+        transparent 2px,
+        rgba(0, 0, 0, 0.07) 2px,
+        rgba(0, 0, 0, 0.07) 4px
+      );
+      pointer-events: none;
+      z-index: 9999;
+    }
+
+    /* ── Terminal glitch blink ────────────────────────────── */
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    .blink { animation: blink 1.2s step-end infinite; }
+
+    /* ── Pulse dot ────────────────────────────────────────── */
+    @keyframes pulse-green {
+      0%, 100% { box-shadow: 0 0 0 0 rgba(0,245,160,.6); }
+      50%       { box-shadow: 0 0 0 5px rgba(0,245,160,0); }
+    }
+    .pulse-dot {
+      animation: pulse-green 2s ease-in-out infinite;
+    }
+
+    /* ── Refresh spin ─────────────────────────────────────── */
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin .7s linear infinite; }
+
+    /* ── Row hover glow ───────────────────────────────────── */
+    .cluster-row {
+      border-bottom: 1px solid #1E2736;
+      transition: background 0.15s ease;
+      cursor: default;
+    }
+    .cluster-row:hover {
+      background: rgba(0, 245, 160, 0.04);
+    }
+    .cluster-row:hover .row-accent {
+      color: #00F5A0;
+    }
+
+    /* ── Network tab ──────────────────────────────────────── */
+    .net-tab {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.06em;
+      padding: 5px 13px;
+      border-radius: 4px;
+      border: 1px solid #1E2736;
+      background: transparent;
+      color: #64748B;
+      cursor: pointer;
+      transition: all 0.18s ease;
+      white-space: nowrap;
+      user-select: none;
+    }
+    .net-tab:hover { color: #E2E8F0; border-color: #334155; }
+    .net-tab.active-all    { color: #E2E8F0; background: #1E2736; border-color: #334155; }
+    .net-tab.active-eth    { color: #627EEA; background: rgba(98,126,234,.12); border-color: rgba(98,126,234,.4); }
+    .net-tab.active-sol    { color: #14F195; background: rgba(20,241,149,.1);  border-color: rgba(20,241,149,.4); }
+    .net-tab.active-base   { color: #4B8EF7; background: rgba(0,82,255,.12);   border-color: rgba(0,82,255,.4); }
+    .net-tab.active-bsc    { color: #F3BA2F; background: rgba(243,186,47,.1);  border-color: rgba(243,186,47,.4); }
+
+    /* ── Badge ────────────────────────────────────────────── */
+    .badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      padding: 2px 7px;
+      border-radius: 3px;
+    }
+    .badge-eth  { color: #627EEA; background: rgba(98,126,234,.12);  border: 1px solid rgba(98,126,234,.3); }
+    .badge-sol  { color: #14F195; background: rgba(20,241,149,.1);   border: 1px solid rgba(20,241,149,.3); }
+    .badge-base { color: #4B8EF7; background: rgba(0,82,255,.12);    border: 1px solid rgba(0,82,255,.3); }
+    .badge-bsc  { color: #F3BA2F; background: rgba(243,186,47,.1);   border: 1px solid rgba(243,186,47,.3); }
+    .badge-unk  { color: #64748B; background: rgba(100,116,139,.1);  border: 1px solid rgba(100,116,139,.3); }
+
+    /* ── VIP button ───────────────────────────────────────── */
+    .vip-btn {
+      background: linear-gradient(135deg, rgba(245,158,11,.1), rgba(245,158,11,.05));
+      border: 1px solid rgba(245,158,11,.4);
+      color: #F59E0B;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 14px;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      white-space: nowrap;
+    }
+    .vip-btn:hover {
+      background: rgba(245,158,11,.18);
+      border-color: rgba(245,158,11,.7);
+      box-shadow: 0 0 16px rgba(245,158,11,.2);
+    }
+
+    /* ── Modal backdrop ───────────────────────────────────── */
+    .modal-backdrop {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(5, 7, 12, 0.85);
+      backdrop-filter: blur(8px);
+      -webkit-backdrop-filter: blur(8px);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+    }
+    .modal-backdrop.open { display: flex; }
+
+    .modal-panel {
+      background: #131722;
+      border: 1px solid rgba(245,158,11,.3);
+      border-radius: 12px;
+      width: 100%;
+      max-width: 400px;
+      box-shadow: 0 0 60px rgba(245,158,11,.1), 0 24px 48px rgba(0,0,0,.6);
+      overflow: hidden;
+    }
+
+    /* ── Scrollable table container ───────────────────────── */
+    .table-wrap {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .table-wrap::-webkit-scrollbar { height: 4px; }
+    .table-wrap::-webkit-scrollbar-track { background: #0B0E14; }
+    .table-wrap::-webkit-scrollbar-thumb { background: #1E2736; border-radius: 2px; }
+
+    /* ── Mono data ────────────────────────────────────────── */
+    .mono { font-family: 'JetBrains Mono', monospace; }
+
+    /* ── Token clickable ──────────────────────────────────── */
+    .token-link {
+      color: #E2E8F0;
+      font-weight: 600;
+      text-decoration: none;
+      transition: color 0.15s;
+    }
+    .token-link:hover { color: #00F5A0; text-decoration: underline; }
+
+    /* ── Wallet masked ────────────────────────────────────── */
+    .wallet-link {
+      color: #64748B;
+      cursor: pointer;
+      transition: color 0.15s;
+      font-size: 11px;
+    }
+    .wallet-link:hover { color: #94A3B8; }
+
+    /* ── Stat counter ─────────────────────────────────────── */
+    .stat-counter {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 22px;
+      font-weight: 600;
+      color: #00F5A0;
+      line-height: 1;
+    }
+
+    /* ── Empty / Error states ─────────────────────────────── */
+    .empty-state {
+      padding: 64px 24px;
+      text-align: center;
+      color: #475569;
+    }
+
+    /* ── Fade-in for rows ─────────────────────────────────── */
+    @keyframes fadeInUp {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+    .fade-in { animation: fadeInUp 0.25s ease forwards; }
+
+    /* ── Live indicator ───────────────────────────────────── */
+    @keyframes live-pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.3; }
+    }
+    .live-dot { animation: live-pulse 2s ease-in-out infinite; }
+  </style>
 </head>
-<body class="bg-dark-bg text-dark-text min-h-screen font-sans antialiased flex flex-col">
-    <!-- Header -->
-    <header class="bg-dark-card border-b border-dark-border px-4 py-4 flex items-center justify-between sticky top-0 z-10 shadow-md">
-        <div class="flex items-center space-x-2">
-            <span class="text-2xl">📊</span>
-            <h1 class="text-xl font-bold tracking-wide">Cluster Tracker</h1>
-        </div>
-        <div id="user-info" class="text-xs text-dark-muted bg-dark-bg px-3 py-1 rounded-full border border-dark-border">
-            Loading user...
-        </div>
-    </header>
 
-    <!-- Main Content -->
-    <main class="flex-1 max-w-7xl w-full mx-auto p-4 md:p-6 flex flex-col">
-        <div class="flex items-center justify-between mb-6">
+<body class="flex flex-col" style="min-height:100dvh;">
+
+<!-- ════════════════════════════════════════════════════════
+     NAVBAR
+═════════════════════════════════════════════════════════ -->
+<header style="background:#131722; border-bottom:1px solid #1E2736;" class="sticky top-0 z-50 px-4 py-3">
+  <div class="flex items-center justify-between gap-3 max-w-6xl mx-auto">
+
+    <!-- Branding -->
+    <div class="flex items-center gap-2.5 min-w-0">
+      <div class="relative flex-shrink-0">
+        <span class="text-xl">📊</span>
+        <!-- Live indicator -->
+        <span class="absolute -top-0.5 -right-0.5 w-2 h-2 rounded-full live-dot" style="background:#00F5A0;"></span>
+      </div>
+      <div class="min-w-0">
+        <div class="mono font-semibold text-sm tracking-wide leading-none" style="color:#E2E8F0;">
+          SMART CLUSTER<span class="blink" style="color:#00F5A0;">_</span>TERMINAL
+        </div>
+        <div class="text-xs mt-0.5" style="color:#475569; font-size:10px; letter-spacing:.06em;">
+          SMART MONEY INTELLIGENCE
+        </div>
+      </div>
+    </div>
+
+    <!-- Right side: user + plan + VIP -->
+    <div class="flex items-center gap-2 flex-shrink-0">
+      <!-- User badge -->
+      <div id="user-badge" class="mono text-xs px-2.5 py-1 rounded" style="background:#0B0E14; border:1px solid #1E2736; color:#64748B; font-size:10px; letter-spacing:.04em;">
+        @loading
+      </div>
+      <!-- Plan badge -->
+      <div id="plan-badge" class="mono text-xs px-2.5 py-1 rounded" style="background:#0B0E14; border:1px solid #334155; color:#94A3B8; font-size:10px; letter-spacing:.05em;">
+        FREE PLAN
+      </div>
+      <!-- VIP CTA -->
+      <button class="vip-btn" onclick="openVipModal()">👑 Get VIP</button>
+    </div>
+  </div>
+</header>
+
+<!-- ════════════════════════════════════════════════════════
+     STATS BAR
+═════════════════════════════════════════════════════════ -->
+<div style="background:#0F1420; border-bottom:1px solid #1E2736;" class="px-4 py-3">
+  <div class="max-w-6xl mx-auto flex items-center gap-6 overflow-x-auto" style="-webkit-overflow-scrolling:touch;">
+    <div class="flex-shrink-0">
+      <div class="text-xs mono" style="color:#475569; letter-spacing:.08em;">CLUSTERS DETECTED</div>
+      <div id="stat-total" class="stat-counter mt-0.5">—</div>
+    </div>
+    <div class="w-px h-8 flex-shrink-0" style="background:#1E2736;"></div>
+    <div class="flex-shrink-0">
+      <div class="text-xs mono" style="color:#475569; letter-spacing:.08em;">TOTAL VOLUME</div>
+      <div id="stat-volume" class="stat-counter mt-0.5">—</div>
+    </div>
+    <div class="w-px h-8 flex-shrink-0" style="background:#1E2736;"></div>
+    <div class="flex-shrink-0">
+      <div class="text-xs mono" style="color:#475569; letter-spacing:.08em;">LAST UPDATE</div>
+      <div id="stat-time" class="stat-counter mt-0.5" style="font-size:14px; color:#94A3B8;">—</div>
+    </div>
+    <div class="w-px h-8 flex-shrink-0" style="background:#1E2736;"></div>
+    <div class="flex-shrink-0">
+      <div class="text-xs mono" style="color:#475569; letter-spacing:.08em;">AUTO REFRESH</div>
+      <div class="mono mt-0.5 font-semibold text-sm" style="color:#F59E0B; font-size:14px;">30s</div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     MAIN
+═════════════════════════════════════════════════════════ -->
+<main class="flex-1 max-w-6xl w-full mx-auto px-4 py-5 flex flex-col gap-4">
+
+  <!-- Toolbar row -->
+  <div class="flex items-center justify-between gap-3 flex-wrap">
+    <!-- Network filter tabs -->
+    <div class="flex items-center gap-2 flex-wrap">
+      <button class="net-tab active-all" data-network="ALL"      onclick="setNetwork('ALL',this)">ALL</button>
+      <button class="net-tab"            data-network="ethereum"  onclick="setNetwork('ethereum',this)">⬡ ETH</button>
+      <button class="net-tab"            data-network="solana"    onclick="setNetwork('solana',this)">◎ SOL</button>
+      <button class="net-tab"            data-network="base"      onclick="setNetwork('base',this)">🔵 BASE</button>
+      <button class="net-tab"            data-network="bsc"       onclick="setNetwork('bsc',this)">🟡 BSC</button>
+    </div>
+
+    <!-- Refresh button -->
+    <button id="refresh-btn" onclick="fetchClusters()" class="mono text-xs font-semibold px-4 py-2 rounded-md transition-all duration-200 flex items-center gap-2"
+      style="background:#131722; border:1px solid #1E2736; color:#64748B;"
+      onmouseenter="this.style.borderColor='#334155'; this.style.color='#94A3B8';"
+      onmouseleave="this.style.borderColor='#1E2736'; this.style.color='#64748B';">
+      <span id="refresh-icon">↻</span>
+      <span>REFRESH</span>
+    </button>
+  </div>
+
+  <!-- Table panel -->
+  <div style="background:#131722; border:1px solid #1E2736; border-radius:8px; overflow:hidden;" class="flex-1 flex flex-col">
+
+    <!-- Panel header -->
+    <div class="flex items-center justify-between px-4 py-3" style="border-bottom:1px solid #1E2736;">
+      <div class="flex items-center gap-2.5">
+        <span class="w-2 h-2 rounded-full flex-shrink-0 pulse-dot" style="background:#00F5A0;"></span>
+        <span class="mono text-xs font-semibold tracking-widest" style="color:#64748B; letter-spacing:.1em;">
+          CLUSTER HISTORY — SMART MONEY &gt;$10K
+        </span>
+      </div>
+      <span id="row-count" class="mono text-xs" style="color:#334155;">0 records</span>
+    </div>
+
+    <!-- Table -->
+    <div class="table-wrap flex-1">
+      <table class="w-full text-left" style="border-collapse:collapse; min-width:680px;">
+        <thead>
+          <tr style="background:#0F1420;">
+            <th class="mono text-left py-2.5 px-4" style="color:#334155; font-size:10px; letter-spacing:.12em; font-weight:600; border-bottom:1px solid #1E2736;">TOKEN</th>
+            <th class="mono text-left py-2.5 px-4" style="color:#334155; font-size:10px; letter-spacing:.12em; font-weight:600; border-bottom:1px solid #1E2736;">NETWORK</th>
+            <th class="mono text-right py-2.5 px-4" style="color:#334155; font-size:10px; letter-spacing:.12em; font-weight:600; border-bottom:1px solid #1E2736;">VOLUME (USD)</th>
+            <th class="mono text-left py-2.5 px-4" style="color:#334155; font-size:10px; letter-spacing:.12em; font-weight:600; border-bottom:1px solid #1E2736;">WALLET</th>
+            <th class="mono text-right py-2.5 px-4" style="color:#334155; font-size:10px; letter-spacing:.12em; font-weight:600; border-bottom:1px solid #1E2736;">TIME</th>
+          </tr>
+        </thead>
+        <tbody id="clusters-tbody">
+          <tr>
+            <td colspan="5" class="empty-state">
+              <div class="mono text-sm" style="color:#334155;">Fetching cluster data<span class="blink">_</span></div>
+            </td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</main>
+
+<!-- ════════════════════════════════════════════════════════
+     FOOTER
+═════════════════════════════════════════════════════════ -->
+<footer class="px-4 py-3 text-center" style="border-top:1px solid #1E2736; background:#0B0E14;">
+  <span class="mono text-xs" style="color:#1E2736; letter-spacing:.08em;">
+    SMART CLUSTER TERMINAL © 2026 · SMART MONEY INTELLIGENCE
+  </span>
+</footer>
+
+<!-- ════════════════════════════════════════════════════════
+     VIP MODAL
+═════════════════════════════════════════════════════════ -->
+<div id="vip-modal" class="modal-backdrop" onclick="handleBackdropClick(event)">
+  <div class="modal-panel">
+    <!-- Modal header -->
+    <div class="px-6 py-5" style="border-bottom:1px solid rgba(245,158,11,.15);">
+      <div class="flex items-center justify-between">
+        <div>
+          <div class="flex items-center gap-2.5">
+            <span class="text-xl">👑</span>
+            <span class="font-bold text-base tracking-wide" style="color:#F59E0B;">VIP ACCESS PASS</span>
+          </div>
+          <div class="mono text-xs mt-1" style="color:#475569; letter-spacing:.06em;">UNLOCK FULL INTELLIGENCE SUITE</div>
+        </div>
+        <button onclick="closeVipModal()" class="w-8 h-8 flex items-center justify-center rounded-md transition-colors"
+          style="color:#475569; background:#0B0E14; border:1px solid #1E2736;"
+          onmouseenter="this.style.color='#E2E8F0';"
+          onmouseleave="this.style.color='#475569';">✕</button>
+      </div>
+    </div>
+
+    <!-- Features list -->
+    <div class="px-6 py-5 flex flex-col gap-3.5">
+      <div class="vip-feature-row" style="border:1px solid #1E2736; background:#0B0E14; border-radius:8px; padding:14px 16px;">
+        <div class="flex items-start gap-3">
+          <span class="text-lg flex-shrink-0 mt-0.5">🔓</span>
+          <div>
+            <div class="font-semibold text-sm" style="color:#E2E8F0;">Unmask All Whale Wallets</div>
+            <div class="text-xs mt-1" style="color:#475569;">See 100% of smart money wallet addresses — no more masked <span class="mono">0x69...1933</span> placeholders.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="vip-feature-row" style="border:1px solid #1E2736; background:#0B0E14; border-radius:8px; padding:14px 16px;">
+        <div class="flex items-start gap-3">
+          <span class="text-lg flex-shrink-0 mt-0.5">⚡</span>
+          <div>
+            <div class="font-semibold text-sm" style="color:#E2E8F0;">Real-Time Telegram Alerts</div>
+            <div class="text-xs mt-1" style="color:#475569;">Get instant push alerts the moment a new cluster is detected — before it moves.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="vip-feature-row" style="border:1px solid #1E2736; background:#0B0E14; border-radius:8px; padding:14px 16px;">
+        <div class="flex items-start gap-3">
+          <span class="text-lg flex-shrink-0 mt-0.5">🎯</span>
+          <div>
+            <div class="font-semibold text-sm" style="color:#E2E8F0;">Custom Filters & Watchlists</div>
+            <div class="text-xs mt-1" style="color:#475569;">Filter by token, chain, minimum volume, and track specific wallets across all networks.</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="vip-feature-row" style="border:1px solid #1E2736; background:#0B0E14; border-radius:8px; padding:14px 16px;">
+        <div class="flex items-start gap-3">
+          <span class="text-lg flex-shrink-0 mt-0.5">📈</span>
+          <div>
+            <div class="font-semibold text-sm" style="color:#E2E8F0;">Historical Intelligence Archive</div>
+            <div class="text-xs mt-1" style="color:#475569;">Unlimited cluster history, exportable CSV, and pattern analytics dashboard.</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- CTA -->
+    <div class="px-6 pb-6">
+      <button onclick="handleVipPurchase()"
+        class="w-full py-3.5 rounded-lg font-bold text-sm tracking-wide transition-all duration-200"
+        style="background:linear-gradient(135deg,#F59E0B,#B97A08); color:#000; box-shadow:0 0 24px rgba(245,158,11,.3);"
+        onmouseenter="this.style.boxShadow='0 0 40px rgba(245,158,11,.5)'; this.style.transform='translateY(-1px)';"
+        onmouseleave="this.style.boxShadow='0 0 24px rgba(245,158,11,.3)'; this.style.transform='translateY(0)';">
+        🔑 Unlock VIP Access — Telegram Stars / Crypto
+      </button>
+      <div class="text-center mono text-xs mt-3" style="color:#334155; letter-spacing:.04em;">
+        Instant activation · Cancel anytime
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ════════════════════════════════════════════════════════
+     JAVASCRIPT
+═════════════════════════════════════════════════════════ -->
+<script>
+  // ── State ──────────────────────────────────────────────────────────────────
+  let allClusters  = [];
+  let activeNetwork = 'ALL';
+  let refreshTimer  = null;
+
+  // ── Telegram WebApp init ────────────────────────────────────────────────────
+  (function initTG() {
+    const badge = document.getElementById('user-badge');
+    if (window.Telegram && window.Telegram.WebApp) {
+      const tg = window.Telegram.WebApp;
+      tg.ready();
+      tg.expand();
+      const user = tg.initDataUnsafe && tg.initDataUnsafe.user;
+      if (user) {
+        badge.textContent = '@' + (user.username || user.first_name || 'user');
+        badge.style.color = '#00F5A0';
+        badge.style.borderColor = 'rgba(0,245,160,.3)';
+      } else {
+        badge.textContent = 'BROWSER MODE';
+      }
+    } else {
+      badge.textContent = 'BROWSER MODE';
+    }
+  })();
+
+  // ── Network colors ──────────────────────────────────────────────────────────
+  const NETWORK_META = {
+    ethereum: { label: 'ETH',      cls: 'badge-eth',  explorer: 'https://etherscan.io/address/' },
+    solana:   { label: 'SOL',      cls: 'badge-sol',  explorer: 'https://solscan.io/account/' },
+    base:     { label: 'BASE',     cls: 'badge-base', explorer: 'https://basescan.org/address/' },
+    bsc:      { label: 'BSC',      cls: 'badge-bsc',  explorer: 'https://bscscan.com/address/' },
+  };
+
+  function getNetworkMeta(chain) {
+    if (!chain) return { label: 'UNKNOWN', cls: 'badge-unk', explorer: '' };
+    const key = chain.toLowerCase().replace(/\s+/g, '');
+    const aliases = { eth: 'ethereum', 'bnb': 'bsc', 'bsc': 'bsc', 'sol': 'solana' };
+    const resolved = aliases[key] || key;
+    return NETWORK_META[resolved] || { label: chain.toUpperCase().slice(0, 6), cls: 'badge-unk', explorer: '' };
+  }
+
+  // ── Helpers ─────────────────────────────────────────────────────────────────
+  function fmtUSD(n) {
+    const v = Number(n) || 0;
+    if (v >= 1_000_000) return '$' + (v / 1_000_000).toFixed(2) + 'M';
+    if (v >= 1_000)     return '$' + (v / 1_000).toFixed(1) + 'K';
+    return '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function fmtVolumeRaw(n) {
+    const v = Number(n) || 0;
+    return '$' + v.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function maskWallet(addr) {
+    if (!addr || addr.length < 12) return addr || '—';
+    return addr.slice(0, 6) + '…' + addr.slice(-4);
+  }
+
+  function timeAgo(dateStr) {
+    if (!dateStr) return '—';
+    const d = new Date(dateStr);
+    if (isNaN(d.getTime())) return '—';
+    const secs = Math.floor((Date.now() - d.getTime()) / 1000);
+    if (secs < 60)   return secs + 's ago';
+    if (secs < 3600) return Math.floor(secs / 60) + 'm ago';
+    if (secs < 86400) return Math.floor(secs / 3600) + 'h ago';
+    return Math.floor(secs / 86400) + 'd ago';
+  }
+
+  // ── Network filter ──────────────────────────────────────────────────────────
+  function setNetwork(network, btn) {
+    activeNetwork = network;
+    document.querySelectorAll('.net-tab').forEach(t => {
+      t.className = 'net-tab';
+    });
+    const clsMap = { ALL: 'active-all', ethereum: 'active-eth', solana: 'active-sol', base: 'active-base', bsc: 'active-bsc' };
+    btn.classList.add(clsMap[network] || 'active-all');
+    renderTable(allClusters);
+  }
+
+  // ── Render table ────────────────────────────────────────────────────────────
+  function renderTable(clusters) {
+    const tbody = document.getElementById('clusters-tbody');
+    const rowCount = document.getElementById('row-count');
+
+    let filtered = clusters;
+    if (activeNetwork !== 'ALL') {
+      filtered = clusters.filter(c => {
+        const chain = (c.Chain || '').toLowerCase();
+        return chain.includes(activeNetwork) || chain === activeNetwork.toLowerCase();
+      });
+    }
+
+    rowCount.textContent = filtered.length + ' record' + (filtered.length !== 1 ? 's' : '');
+
+    if (!filtered.length) {
+      tbody.innerHTML = `
+        <tr>
+          <td colspan="5" class="empty-state">
+            <div class="text-3xl mb-3" style="opacity:.2;">📭</div>
+            <div class="mono text-sm font-semibold mb-1" style="color:#334155;">NO CLUSTERS FOUND</div>
+            <div class="text-xs" style="color:#1E2736;">
+              ${activeNetwork !== 'ALL'
+                ? `No activity detected on ${activeNetwork.toUpperCase()} yet.`
+                : 'No cluster history yet. The engine is scanning…'}
+            </div>
+          </td>
+        </tr>`;
+      return;
+    }
+
+    tbody.innerHTML = filtered.map((c, i) => {
+      const meta       = getNetworkMeta(c.Chain);
+      const symbol     = (c.TokenSymbol || 'UNKNOWN').toUpperCase();
+      const dexUrl     = `https://dexscreener.com/search?q=${encodeURIComponent(symbol)}`;
+      const walletAddr = c.WalletAddress || c.TokenAddress || '';
+      const masked     = maskWallet(walletAddr);
+      const explorerUrl = meta.explorer ? meta.explorer + walletAddr : null;
+
+      return `
+      <tr class="cluster-row fade-in" style="animation-delay:${Math.min(i * 30, 200)}ms;">
+        <!-- Token -->
+        <td class="py-3 px-4">
+          <div class="flex items-center gap-2.5">
+            <span class="w-1.5 h-1.5 rounded-full flex-shrink-0 pulse-dot" style="background:#00F5A0;"></span>
             <div>
-                <h2 class="text-2xl font-semibold">Detected Clusters</h2>
-                <p class="text-sm text-dark-muted mt-1">Real-time smart wallet accumulation clusters (> $10,000 volume)</p>
+              <a href="${dexUrl}" target="_blank" rel="noopener noreferrer" class="token-link mono text-sm">${symbol}</a>
+              <div class="mono text-xs mt-0.5" style="color:#334155; font-size:9px;" title="${c.TokenAddress || ''}">${maskWallet(c.TokenAddress)}</div>
             </div>
-            <button onclick="fetchClusters()" class="bg-indigo-600 hover:bg-indigo-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition duration-200 flex items-center shadow-lg shadow-indigo-500/20">
-                🔄 Refresh
-            </button>
-        </div>
+          </div>
+        </td>
+        <!-- Network -->
+        <td class="py-3 px-4">
+          <span class="badge ${meta.cls}">${meta.label}</span>
+        </td>
+        <!-- Volume -->
+        <td class="py-3 px-4 text-right">
+          <span class="mono font-semibold text-sm row-accent" style="color:#00F5A0;">${fmtUSD(c.TotalVolumeUSD)}</span>
+        </td>
+        <!-- Wallet -->
+        <td class="py-3 px-4">
+          ${explorerUrl
+            ? `<a href="${explorerUrl}" target="_blank" rel="noopener noreferrer" class="wallet-link mono">${masked}</a>`
+            : `<span class="wallet-link mono" onclick="openVipModal()" title="Unlock full address with VIP">${masked} 🔒</span>`}
+        </td>
+        <!-- Time -->
+        <td class="py-3 px-4 text-right">
+          <span class="mono text-xs" style="color:#475569;">${timeAgo(c.CreatedAt)}</span>
+        </td>
+      </tr>`;
+    }).join('');
+  }
 
-        <!-- Clusters Table Container -->
-        <div class="bg-dark-card border border-dark-border rounded-xl shadow-xl overflow-hidden flex-1 flex flex-col">
-            <div class="overflow-x-auto flex-1">
-                <table class="w-full text-left border-collapse">
-                    <thead>
-                        <tr class="bg-slate-800/60 border-b border-dark-border text-xs uppercase tracking-wider text-dark-muted">
-                            <th class="py-3 px-4 font-semibold">Token</th>
-                            <th class="py-3 px-4 font-semibold">Network</th>
-                            <th class="py-3 px-4 font-semibold">Volume (USD)</th>
-                            <th class="py-3 px-4 font-semibold">Wallet Address</th>
-                        </tr>
-                    </thead>
-                    <tbody id="clusters-table-body" class="divide-y divide-dark-border text-sm">
-                        <tr>
-                            <td colspan="4" class="py-8 text-center text-dark-muted">Loading clusters data...</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-    </main>
+  // ── Fetch clusters ──────────────────────────────────────────────────────────
+  async function fetchClusters() {
+    const icon = document.getElementById('refresh-icon');
+    icon.classList.add('spin');
 
-    <!-- Footer -->
-    <footer class="bg-dark-card border-t border-dark-border py-3 text-center text-xs text-dark-muted">
-        Smart Cluster Bot &copy; 2026. All rights reserved.
-    </footer>
+    try {
+      const res = await fetch('/api/clusters');
+      if (!res.ok) throw new Error('HTTP ' + res.status);
+      const data = await res.json();
+      allClusters = Array.isArray(data) ? data : [];
 
-    <script>
-        // Initialize Telegram WebApp if available
-        if (window.Telegram && window.Telegram.WebApp) {
-            const tg = window.Telegram.WebApp;
-            tg.ready();
-            tg.expand();
+      // Update stats
+      const total     = allClusters.length;
+      const volume    = allClusters.reduce((s, c) => s + (Number(c.TotalVolumeUSD) || 0), 0);
+      document.getElementById('stat-total').textContent  = total;
+      document.getElementById('stat-volume').textContent = fmtUSD(volume);
+      document.getElementById('stat-time').textContent   = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
-            if (tg.initDataUnsafe && tg.initDataUnsafe.user) {
-                const user = tg.initDataUnsafe.user;
-                document.getElementById('user-info').innerText = `@${user.username || user.first_name || 'User'}`;
-            } else {
-                document.getElementById('user-info').innerText = 'Web Mode';
-            }
-        } else {
-            document.getElementById('user-info').innerText = 'Browser Mode';
-        }
+      renderTable(allClusters);
+    } catch (err) {
+      console.error('fetchClusters error:', err);
+      document.getElementById('clusters-tbody').innerHTML = `
+        <tr>
+          <td colspan="5" class="empty-state">
+            <div class="text-2xl mb-3" style="opacity:.3;">⚠️</div>
+            <div class="mono text-sm font-semibold mb-1" style="color:#475569;">FEED UNAVAILABLE</div>
+            <div class="text-xs" style="color:#334155;">Could not reach /api/clusters — retrying in 30s.</div>
+          </td>
+        </tr>`;
+    } finally {
+      icon.classList.remove('spin');
+    }
+  }
 
-        async function fetchClusters() {
-            const tbody = document.getElementById('clusters-table-body');
-            try {
-                const response = await fetch('/api/clusters');
-                if (!response.ok) {
-                    throw new Error('Failed to fetch clusters');
-                }
-                const clusters = await response.json();
+  // ── Auto refresh ────────────────────────────────────────────────────────────
+  function startAutoRefresh() {
+    if (refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(fetchClusters, 30_000);
+  }
 
-                if (!clusters || clusters.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="4" class="py-8 text-center text-dark-muted">No cluster history found yet.</td></tr>`;
-                    return;
-                }
+  // ── VIP Modal ───────────────────────────────────────────────────────────────
+  function openVipModal() {
+    document.getElementById('vip-modal').classList.add('open');
+    document.body.style.overflow = 'hidden';
+  }
 
-                tbody.innerHTML = clusters.map(c => `
-                    <tr class="hover:bg-slate-800/40 transition duration-150">
-                        <td class="py-3 px-4 font-medium flex items-center space-x-2">
-                            <span class="w-2 h-2 rounded-full bg-emerald-500"></span>
-                            <span>${c.TokenSymbol || 'UNKNOWN'}</span>
-                            <span class="text-xs text-dark-muted truncate max-w-[100px]" title="${c.TokenAddress}">${c.TokenAddress}</span>
-                        </td>
-                        <td class="py-3 px-4">
-                            <span class="px-2.5 py-1 text-xs rounded-full bg-indigo-500/10 text-indigo-400 border border-indigo-500/20">${c.Chain || 'Ethereum'}</span>
-                        </td>
-                        <td class="py-3 px-4 font-semibold text-emerald-400">
-                            $${Number(c.TotalVolumeUSD || c.AmountUSD || 0).toLocaleString(undefined, {minimumFractionDigits: 2, maximumFractionDigits: 2})}
-                        </td>
-                        <td class="py-3 px-4 font-mono text-xs text-dark-muted truncate max-w-[150px]" title="${c.WalletAddress || c.TokenAddress}">
-                            ${c.WalletAddress || '0x...'}
-                        </td>
-                    </tr>
-                `).join('');
-            } catch (err) {
-                console.error(err);
-                tbody.innerHTML = `<tr><td colspan="4" class="py-8 text-center text-red-400">Error loading cluster data. Please retry.</td></tr>`;
-            }
-        }
+  function closeVipModal() {
+    document.getElementById('vip-modal').classList.remove('open');
+    document.body.style.overflow = '';
+  }
 
-        // Fetch on load and every 10 seconds
-        fetchClusters();
-        setInterval(fetchClusters, 10000);
-    </script>
+  function handleBackdropClick(e) {
+    if (e.target === document.getElementById('vip-modal')) closeVipModal();
+  }
+
+  function handleVipPurchase() {
+    // Hook this up to your Telegram Stars / payment flow
+    if (window.Telegram && window.Telegram.WebApp) {
+      window.Telegram.WebApp.showAlert('VIP purchase flow coming soon! Contact @support.');
+    } else {
+      alert('VIP purchase flow coming soon!');
+    }
+  }
+
+  // ── ESC to close modal ──────────────────────────────────────────────────────
+  document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeVipModal();
+  });
+
+  // ── Boot ────────────────────────────────────────────────────────────────────
+  fetchClusters();
+  startAutoRefresh();
+</script>
 </body>
 </html>
