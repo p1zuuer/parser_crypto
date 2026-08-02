@@ -1,0 +1,20 @@
+# Binaries
+/smart-cluster-bot
+/bin/
+*.exe
+
+# Database files
+/data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Environment files
+.env
+.env.local
+
+# IDE and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

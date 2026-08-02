@@ -1,0 +1,12 @@
+version: '3.8'
+
+services:
+  bot:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      - BOT_TOKEN=mock_token_12345:abcde
+      - PORT=8080
+      - WEBHOOK_URL=https://example.com/webhook
+    restart: unless-stopped

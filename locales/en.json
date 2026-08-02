@@ -1,0 +1,7 @@
+{
+  "welcome_message": "Welcome to Smart Cluster Bot! 🚀\nTrack on-chain insider clusters effortlessly.",
+  "choose_language": "Please choose your language:",
+  "cluster_alert_vip": "🚨 VIP CLUSTER DETECTED 🚨\n\nToken: %s (%s)\nChain: %s\nAddress: `%s`\nUnique Wallets: %d\nTotal Volume: $%.2f\nTime Window: %ds",
+  "cluster_alert_free": "🚨 CLUSTER DETECTED 🚨\n\nToken: %s (%s)\nChain: %s\nAddress: `%s`\nVolume Stats: $%.2f\n\n⚠️ Upgrade to VIP to see full wallet addresses and instant alerts!",
+  "btn_upgrade": "⭐ Upgrade to VIP"
+}
