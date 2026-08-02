@@ -84,9 +84,23 @@ func (h *WebhookHandler) handleMessage(msg *Message) {
 
 	text := strings.TrimSpace(msg.Text)
 
+	// Gatekeeper: if TOS not accepted, block all access and send strict disclaimer
+	if !user.TosAccepted {
+		if text == "accept_tos" || strings.HasPrefix(text, "accept_tos") || text == "/start" {
+			// handled below via callback or explicit flow, but for normal text messages when not accepted:
+			h.sendTosDisclaimer(chatID, user.Language)
+			return
+		}
+		h.sendTosDisclaimer(chatID, user.Language)
+		return
+	}
+
 	switch {
 	case text == "/start":
 		h.sendStartMenu(chatID, from.FirstName, user)
+
+	case text == "/manual" || text == "/help":
+		h.sendManual(chatID, user.Language)
 
 	case strings.HasPrefix(text, "/watch"):
 		h.handleWatchCommand(chatID, from.ID, text, user.Language)
@@ -100,8 +114,29 @@ func (h *WebhookHandler) handleMessage(msg *Message) {
 	case text == "/hot":
 		h.sendHotWallets(chatID, user.Language)
 
+	case text == "/vip":
+		h.sendVIPMenu(chatID, user.Language)
+
 	default:
 		h.sendStartMenu(chatID, from.FirstName, user)
+	}
+}
+
+// ── ToS Disclaimer Gatekeeper ───────────────────────────────────────────────────
+
+func (h *WebhookHandler) sendTosDisclaimer(chatID int64, lang string) {
+	msg := "⚠️ <b>Внимание!</b> Smart Cluster Terminal — это исключительно аналитический инструмент для отслеживания публичных транзакций в блокчейне. Бот НЕ дает финансовых советов (Not Financial Advice) и НЕ является призывом к инвестициям. Рынок криптовалют несет сверхвысокие риски полной потери средств. Создатели бота не несут никакой ответственности за ваши торговые решения и финансовые потери. Вы используете сервис на свой страх и риск. Подтверждая, вы соглашаетесь с условиями и подтверждаете, что вам есть 18 лет."
+
+	kb := &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{
+				{Text: "✅ Я прочитал, принимаю риски и мне есть 18 лет", CallbackData: "accept_tos"},
+			},
+		},
+	}
+
+	if err := h.client.SendMessageWithKeyboard(chatID, msg, kb); err != nil {
+		log.Printf("[HANDLER] sendTosDisclaimer %d: %v", chatID, err)
 	}
 }
 
@@ -119,10 +154,10 @@ func (h *WebhookHandler) sendStartMenu(chatID int64, firstName string, user *sto
 	var body string
 	if lang == "ru" {
 		body = fmt.Sprintf(
-			"👋 <b>Привет, %s!</b>\n"+
+			"<pre>�� SMART CLUSTER TERMINAL</pre>\n"+
+				" <b>Привет, %s!</b>\n"+
 				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n"+
-				"📊 <b>Smart Cluster Terminal</b>\n"+
-				"Аналитика и безопасность смарт-денег в реальном времени.\n\n"+
+				"📊 Аналитика и безопасность смарт-денег в реальном времени.\n\n"+
 				"👤 План: <b>%s</b>\n"+
 				"🔔 Мин. объём: <b>$%s</b>\n"+
 				"🌐 Сети: %s\n"+
@@ -135,10 +170,10 @@ func (h *WebhookHandler) sendStartMenu(chatID int64, firstName string, user *sto
 		)
 	} else {
 		body = fmt.Sprintf(
-			"👋 <b>Hello, %s!</b>\n"+
+			"<pre>💎 SMART CLUSTER TERMINAL</pre>\n"+
+				"👋 <b>Hello, %s!</b>\n"+
 				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n"+
-				"📊 <b>Smart Cluster Terminal</b>\n"+
-				"Real-time Smart Money Analytics & Security.\n\n"+
+				"📊 Real-time Smart Money Analytics & Security.\n\n"+
 				"👤 Plan: <b>%s</b>\n"+
 				"🔔 Min Volume: <b>$%s</b>\n"+
 				"🌐 Networks: %s\n"+
@@ -174,8 +209,13 @@ func (h *WebhookHandler) sendStartMenu(chatID int64, firstName string, user *sto
 		},
 	}
 
-	if err := h.client.SendMessageWithKeyboard(chatID, body, kb); err != nil {
-		log.Printf("[HANDLER] sendStartMenu %d: %v", chatID, err)
+	// Use SendPhoto with a professional crypto banner placeholder URL to force wide bubble rendering, or fallback if photo fails
+	heroBannerURL := "https://images.unsplash.com/photo-1639762681485-074b7f938ba0?w=800&q=80"
+	if err := h.client.SendPhoto(chatID, heroBannerURL, body, kb); err != nil {
+		log.Printf("[HANDLER] sendStartMenu SendPhoto fallback: %v", err)
+		if err := h.client.SendMessageWithKeyboard(chatID, body, kb); err != nil {
+			log.Printf("[HANDLER] sendStartMenu %d: %v", chatID, err)
+		}
 	}
 }
 
@@ -414,6 +454,11 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 	currentLang := user.Language
 
 	switch {
+	case data == "accept_tos":
+		_ = h.storage.SetUserTosAccepted(userID, true)
+		user.TosAccepted = true
+		h.editStartMenu(chatID, msgID, cb.From.FirstName, user)
+
 	case data == "cb:menu":
 		h.editStartMenu(chatID, msgID, cb.From.FirstName, user)
 
@@ -437,6 +482,18 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 
 	case data == "cb:help":
 		h.editHelp(chatID, msgID, currentLang)
+
+	case data == "pay:stars":
+		h.editPaymentStars(chatID, msgID, currentLang)
+
+	case data == "pay:cryptobot":
+		h.editPaymentCryptoBot(chatID, msgID, currentLang)
+
+	case data == "pay:wallet":
+		h.editPaymentDirectWallet(chatID, msgID, currentLang)
+
+	case strings.HasPrefix(data, "pay:done:"):
+		h.handleDirectPaymentSubmitted(chatID, msgID, userID, data, currentLang)
 
 	case data == "cb:lang":
 		// Toggle language between en and ru
@@ -782,7 +839,107 @@ func (h *WebhookHandler) handleWatchlistRemove(chatID int64, msgID int, userID i
 	h.editWatchlistMenu(chatID, msgID, userID, lang)
 }
 
-// ── VIP info ───────────────────────────────────────────────────────────────────
+// ── VIP Payment Gateways Implementation ───────────────────────────────────────
+
+func (h *WebhookHandler) editPaymentStars(chatID int64, msgID int, lang string) {
+	var body string
+	if lang == "ru" {
+		body = "⭐ <b>Оплата через Telegram Stars (XTR)</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			"Получите 30 дней VIP доступа мгновенно через официальную валюту Telegram Stars.\n\n" +
+			"Стоимость: <b>250 XTR</b>"
+	} else {
+		body = "⭐ <b>Telegram Stars Payment (XTR)</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			"Get 30 days VIP access instantly using official Telegram Stars.\n\n" +
+			"Price: <b>250 XTR</b>"
+	}
+
+	payBtn := "⭐ Pay 250 Stars"
+	if lang == "ru" {
+		payBtn = "⭐ Оплатить 250 Stars"
+	}
+	backText := tr(lang, "⬅️ Back", "⬅️ Назад")
+
+	kb := &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{{Text: payBtn, URL: "https://t.me/StarkWonder?start=stars_vip"}},
+			{{Text: backText, CallbackData: "cb:vip"}},
+		},
+	}
+	h.client.EditMessageText(chatID, msgID, body, kb)
+}
+
+func (h *WebhookHandler) editPaymentCryptoBot(chatID int64, msgID int, lang string) {
+	var body string
+	if lang == "ru" {
+		body = "🤖 <b>Оплата через CryptoBot (@CryptoBot)</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			"Быстрая оплата в USDT или TON через официального бота @CryptoBot.\n\n" +
+			"Стоимость: <b>$9.99 (USDT / TON)</b>"
+	} else {
+		body = "🤖 <b>CryptoBot Payment (@CryptoBot)</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			"Fast payment in USDT or TON via official @CryptoBot.\n\n" +
+			"Price: <b>$9.99 (USDT / TON)</b>"
+	}
+
+	payBtn := "🤖 Pay via CryptoBot"
+	if lang == "ru" {
+		payBtn = "🤖 Оплатить через CryptoBot"
+	}
+	backText := tr(lang, "⬅️ Back", "⬅️ Назад")
+
+	kb := &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{{Text: payBtn, URL: "https://t.me/send?start=IVW392..."}},
+			{{Text: backText, CallbackData: "cb:vip"}},
+		},
+	}
+	h.client.EditMessageText(chatID, msgID, body, kb)
+}
+
+func (h *WebhookHandler) editPaymentDirectWallet(chatID int64, msgID int, lang string) {
+	var body string
+	if lang == "ru" {
+		body = "💎 <b>Прямой перевод крипто (TRC20 / SOL)</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			"Отправьте ровно <b>$10 USDT</b> (TRC20) или <b>0.05 SOL</b> на наш официальный кошелёк:\n\n" +
+			"📌 <b>USDT (TRC20):</b>\n<code>T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb</code>\n\n" +
+			"📌 <b>Solana (SOL):</b>\n<code>7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU</code>\n\n" +
+			"После отправки нажмите кнопку ниже или отправьте TxID администратору @StarkWonder для активации."
+	} else {
+		body = "💎 <b>Direct Crypto Wallet (TRC20 / SOL)</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			"Transfer exactly <b>$10 USDT</b> (TRC20) or <b>0.05 SOL</b> to our official wallet:\n\n" +
+			"📌 <b>USDT (TRC20):</b>\n<code>T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb</code>\n\n" +
+			"📌 <b>Solana (SOL):</b>\n<code>7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU</code>\n\n" +
+			"After transferring, tap below or message @StarkWonder with your TxID for instant activation."
+	}
+
+	submitBtn := "✅ I Have Paid (Submit TxID)"
+	if lang == "ru" {
+		submitBtn = "✅ Я оплатил (Отправить TxID)"
+	}
+	backText := tr(lang, "⬅️ Back", "⬅️ Назад")
+
+	kb := &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{{Text: submitBtn, CallbackData: "pay:done:prompt"}},
+			{{Text: backText, CallbackData: "cb:vip"}},
+		},
+	}
+	h.client.EditMessageText(chatID, msgID, body, kb)
+}
+
+func (h *WebhookHandler) handleDirectPaymentSubmitted(chatID int64, msgID int, userID int64, data, lang string) {
+	_ = h.storage.AddPendingPayment(userID, "direct_crypto", "PENDING_TX_VERIFY")
+	var body string
+	if lang == "ru" {
+		body = "✅ <b>Платёж зафиксирован на проверку!</b>\n\n" +
+			"Ваш запрос на активацию VIP отправлен администратору. Обычно проверка занимает до 15 минут.\n" +
+			"По всем вопросам обращайтесь к @StarkWonder."
+	} else {
+		body = "✅ <b>Payment submitted for verification!</b>\n\n" +
+			"Your VIP activation request has been logged for admin review (usually within 15 minutes).\n" +
+			"Contact @StarkWonder if you need urgent support."
+	}
+	h.client.EditMessageText(chatID, msgID, body, backToMenuKB(lang))
+}
 
 func (h *WebhookHandler) editVIPInfo(chatID int64, msgID int, lang string) {
 	var body string
@@ -939,4 +1096,69 @@ func or(s, fallback string) string {
 		return fallback
 	}
 	return s
+}
+
+// ── Manual / Guide Handler ──────────────────────────────────────────────────────
+
+func (h *WebhookHandler) sendManual(chatID int64, lang string) {
+	var body string
+	if lang == "ru" {
+		body = "📖 <b>Руководство пользователя — Smart Cluster Terminal</b>\n" +
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			"<b>1. Что такое Кластер (Cluster)?</b>\n" +
+			"Кластер — это момент времени, когда несколько независимых высокоприбыльных кошельков (Smart Money) начинают массово аккумулировать один и тот же токен в течение короткого окна (5 минут).\n\n" +
+			"<b>2. Золотое правило (DYOR & RugCheck):</b>\n" +
+			"🛡 <b>ВСЕГДА проверяйте токены через [🛡 RugCheck]</b> перед тем как взаимодействовать с ними! До 90% новых токенов являются высокорисковыми или скамом (honeypot, rugpull).\n\n" +
+			"<b>3. Как использовать бота:</b>\n" +
+			"• 📊 Открывайте WebApp терминал для интерактивного анализа в реальном времени.\n" +
+			"• 🔔 Настраивайте минимальный объём и отслеживаемые сети в настройках.\n" +
+			"• ⭐ Добавляйте важные кошельки в Watchlist с помощью <code>/watch <addr> [заметка]</code>.\n\n" +
+			"⚠️ <b>Важно:</b> Это исключительно аналитический инструмент, а не печатный станок для денег. Делайте собственное исследование (Do Your Own Research — DYOR)!"
+	} else {
+		body = "📖 <b>User Guide — Smart Cluster Terminal</b>\n" +
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			"<b>1. What is a Cluster?</b>\n" +
+			"A cluster occurs when multiple independent high-conviction wallets (Smart Money) simultaneously accumulate the same token within a tight rolling window (5 minutes).\n\n" +
+			"<b>2. The Golden Rule (DYOR & RugCheck):</b>\n" +
+			"🛡 <b>ALWAYS check tokens via [🛡 RugCheck]</b> before interacting! Up to 90% of new tokens carry extreme risk or are scams (honeypots, rugpulls).\n\n" +
+			"<b>3. How to use the Bot:</b>\n" +
+			"• 📊 Open the WebApp terminal for real-time interactive analytics.\n" +
+			"• 🔔 Configure min volume and enabled networks in Settings.\n" +
+			"• ⭐ Track specific wallets using <code>/watch <addr> [note]</code>.\n\n" +
+			"⚠️ <b>Important:</b> This is strictly an analytical scanner, not a magic money printer. Do Your Own Research (DYOR)!"
+	}
+
+	h.client.SendMessageWithKeyboard(chatID, body, backToMenuKB(lang))
+}
+
+func (h *WebhookHandler) sendVIPMenu(chatID int64, lang string) {
+	var body string
+	if lang == "ru" {
+		body = "👑 <b>VIP Пасс — Smart Cluster Terminal</b>\n" +
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			"Выберите удобный способ оплаты VIP-доступа на 30 дней:\n\n" +
+			"🔓 100% адресов без маскировки\n" +
+			"⚡ Мгновенные алерты и экспорт CSV"
+	} else {
+		body = "👑 <b>VIP Pass — Smart Cluster Terminal</b>\n" +
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			"Select your preferred payment method for 30 days VIP access:\n\n" +
+			"🔓 100% unmasked addresses\n" +
+			"⚡ Instant alerts & CSV export"
+	}
+
+	btnStars := "⭐ Telegram Stars (XTR)"
+	btnCryptoBot := "🤖 CryptoBot (@CryptoBot)"
+	btnWallet := "💎 Direct Crypto (TRC20 / SOL)"
+	backText := tr(lang, "⬅️ Back", "⬅️ Назад")
+
+	kb := &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{{Text: btnStars, CallbackData: "pay:stars"}},
+			{{Text: btnCryptoBot, CallbackData: "pay:cryptobot"}},
+			{{Text: btnWallet, CallbackData: "pay:wallet"}},
+			{{Text: backText, CallbackData: "cb:menu"}},
+		},
+	}
+	h.client.SendMessageWithKeyboard(chatID, body, kb)
 }

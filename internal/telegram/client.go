@@ -43,7 +43,25 @@ func NewClientWithBaseURL(baseURL, token string) *Client {
 	return c
 }
 
-// ── Public API methods ─────────────────────────────────────────────────────────
+// SendPhotoRequest is the body sent to sendPhoto.
+type SendPhotoRequest struct {
+	ChatID      int64                 `json:"chat_id"`
+	Photo       string                `json:"photo"`
+	Caption     string                `json:"caption,omitempty"`
+	ParseMode   string                `json:"parse_mode,omitempty"`
+	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+}
+
+// SendPhoto sends a photo with an optional caption and inline keyboard (fixes squished UI).
+func (c *Client) SendPhoto(chatID int64, photoURL, caption string, kb *InlineKeyboardMarkup) error {
+	return c.post("sendPhoto", SendPhotoRequest{
+		ChatID:      chatID,
+		Photo:       photoURL,
+		Caption:     caption,
+		ParseMode:   "HTML",
+		ReplyMarkup: kb,
+	})
+}
 
 // SendMessage sends a plain-text (Markdown) message to chatID.
 func (c *Client) SendMessage(chatID int64, text string) error {

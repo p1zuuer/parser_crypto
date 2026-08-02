@@ -20,6 +20,7 @@ type User struct {
 	Username    string    `db:"username"`
 	Language    string    `db:"language"`
 	IsVIP       bool      `db:"is_vip"`
+	TosAccepted bool      `db:"tos_accepted"`
 	MinVolume   int       `db:"min_volume"`
 	EthEnabled  bool      `db:"eth_enabled"`
 	SolEnabled  bool      `db:"sol_enabled"`
@@ -63,12 +64,22 @@ CREATE TABLE IF NOT EXISTS users (
 	username     TEXT    NOT NULL DEFAULT '',
 	language     TEXT    NOT NULL DEFAULT 'en',
 	is_vip       BOOLEAN NOT NULL DEFAULT 0,
+	tos_accepted BOOLEAN NOT NULL DEFAULT 0,
 	min_volume   INTEGER NOT NULL DEFAULT 10000,
 	eth_enabled  BOOLEAN NOT NULL DEFAULT 1,
 	sol_enabled  BOOLEAN NOT NULL DEFAULT 1,
 	base_enabled BOOLEAN NOT NULL DEFAULT 1,
 	bsc_enabled  BOOLEAN NOT NULL DEFAULT 1,
 	created_at   DATETIME NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pending_payments (
+	id             INTEGER  PRIMARY KEY AUTOINCREMENT,
+	user_id        INTEGER  NOT NULL,
+	method         TEXT     NOT NULL,
+	tx_id          TEXT     NOT NULL,
+	status         TEXT     NOT NULL DEFAULT 'pending',
+	created_at     DATETIME NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS user_watchlists (
@@ -145,22 +156,22 @@ func (s *Storage) GetOrCreateUser(userID int64, username, lang string) (*User, e
 
 	u := &User{}
 	row := s.db.QueryRow(
-		`SELECT user_id, username, language, is_vip, min_volume,
+		`SELECT user_id, username, language, is_vip, tos_accepted, min_volume,
 		        eth_enabled, sol_enabled, base_enabled, bsc_enabled, created_at
 		 FROM users WHERE user_id = ?`, userID)
 
 	var createdStr string
 	err := row.Scan(
-		&u.UserID, &u.Username, &u.Language, &u.IsVIP, &u.MinVolume,
+		&u.UserID, &u.Username, &u.Language, &u.IsVIP, &u.TosAccepted, &u.MinVolume,
 		&u.EthEnabled, &u.SolEnabled, &u.BaseEnabled, &u.BscEnabled, &createdStr,
 	)
 	if err == sql.ErrNoRows {
 		now := time.Now().UTC()
 		_, err = s.db.Exec(
 			`INSERT INTO users
-			 (user_id, username, language, is_vip, min_volume,
+			 (user_id, username, language, is_vip, tos_accepted, min_volume,
 			  eth_enabled, sol_enabled, base_enabled, bsc_enabled, created_at)
-			 VALUES (?, ?, ?, 0, 10000, 1, 1, 1, 1, ?)`,
+			 VALUES (?, ?, ?, 0, 0, 10000, 1, 1, 1, 1, ?)`,
 			userID, username, lang, now,
 		)
 		if err != nil {
@@ -168,7 +179,7 @@ func (s *Storage) GetOrCreateUser(userID int64, username, lang string) (*User, e
 		}
 		return &User{
 			UserID: userID, Username: username, Language: lang,
-			MinVolume: 10000, EthEnabled: true, SolEnabled: true,
+			TosAccepted: false, MinVolume: 10000, EthEnabled: true, SolEnabled: true,
 			BaseEnabled: true, BscEnabled: true, CreatedAt: now,
 		}, nil
 	}
@@ -189,6 +200,12 @@ func (s *Storage) GetOrCreateUser(userID int64, username, lang string) (*User, e
 		}
 	}
 	return u, nil
+}
+
+// SetUserTosAccepted marks terms of service as accepted for a user.
+func (s *Storage) SetUserTosAccepted(userID int64, accepted bool) error {
+	_, err := s.db.Exec(`UPDATE users SET tos_accepted = ? WHERE user_id = ?`, accepted, userID)
+	return err
 }
 
 // UpdateUserSettings persists user alert preferences.
@@ -261,7 +278,7 @@ func (s *Storage) CheckAndIncrementFreeAlert(userID int64, maxAlerts int) (bool,
 // GetAllUsers returns all users (used by the alert broadcaster).
 func (s *Storage) GetAllUsers() ([]User, error) {
 	rows, err := s.db.Query(
-		`SELECT user_id, username, language, is_vip, min_volume,
+		`SELECT user_id, username, language, is_vip, tos_accepted, min_volume,
 		        eth_enabled, sol_enabled, base_enabled, bsc_enabled, created_at
 		 FROM users`,
 	)
@@ -275,7 +292,7 @@ func (s *Storage) GetAllUsers() ([]User, error) {
 		var u User
 		var createdStr string
 		if err := rows.Scan(
-			&u.UserID, &u.Username, &u.Language, &u.IsVIP, &u.MinVolume,
+			&u.UserID, &u.Username, &u.Language, &u.IsVIP, &u.TosAccepted, &u.MinVolume,
 			&u.EthEnabled, &u.SolEnabled, &u.BaseEnabled, &u.BscEnabled, &createdStr,
 		); err != nil {
 			return nil, fmt.Errorf("storage: scan user: %w", err)
@@ -463,7 +480,15 @@ func (s *Storage) GetStats24h() (*Stats24h, error) {
 	return stats, nil
 }
 
-// ── Wallet Heat Score (Bonus Feature #1) ──────────────────────────────────────
+// AddPendingPayment saves a direct crypto payment receipt for admin review.
+func (s *Storage) AddPendingPayment(userID int64, method, txID string) error {
+	_, err := s.db.Exec(
+		`INSERT INTO pending_payments (user_id, method, tx_id, status, created_at)
+		 VALUES (?, ?, ?, 'pending', ?)`,
+		userID, method, txID, time.Now().UTC(),
+	)
+	return err
+}
 
 // WalletHeat represents how active a wallet has been across detected clusters.
 type WalletHeat struct {

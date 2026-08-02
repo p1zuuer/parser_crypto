@@ -41,7 +41,7 @@ type tokenBucket struct {
 // ClusterEngine processes swap events and emits ClusterAlerts when thresholds
 // are exceeded. It is safe for concurrent use.
 type ClusterEngine struct {
-	mu         sync.Mutex
+	mu         sync.RWMutex
 	buckets    map[string]*tokenBucket // keyed by "chain:tokenAddress"
 	minWallets int
 	minVolume  float64

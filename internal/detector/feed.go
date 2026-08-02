@@ -3,6 +3,7 @@ package detector
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/rand"
 	"time"
 )
@@ -41,6 +42,11 @@ var sampleWallets = []string{
 func StartMockFeed(ctx context.Context, engine *ClusterEngine, interval time.Duration) {
 	ticker := time.NewTicker(interval)
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[PANIC RECOVER] StartMockFeed recovered: %v", r)
+			}
+		}()
 		defer ticker.Stop()
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 

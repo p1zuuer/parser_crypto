@@ -148,6 +148,11 @@ func StartAlertBroadcaster(
 	alertsChan <-chan detector.ClusterAlert,
 ) {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[PANIC RECOVER] StartAlertBroadcaster recovered: %v", r)
+			}
+		}()
 		for {
 			select {
 			case <-ctx.Done():
@@ -256,6 +261,11 @@ func broadcastAlert(client *Client, store *storage.Storage, alert detector.Clust
 // StartDailyDigest schedules a daily summary message sent to every user at 09:00 UTC.
 func StartDailyDigest(ctx context.Context, client *Client, store *storage.Storage) {
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[PANIC RECOVER] StartDailyDigest recovered: %v", r)
+			}
+		}()
 		for {
 			next := nextDailyDigestTime()
 			log.Printf("[DIGEST] Next daily digest scheduled at %s", next.Format(time.RFC3339))
