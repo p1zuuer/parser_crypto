@@ -1,51 +1,62 @@
+// Package config loads runtime configuration from environment variables.
 package config
 
 import (
+	"fmt"
 	"os"
 	"strings"
 )
 
-// Config holds all configuration values for the application.
+// Config holds all environment-derived settings the bot needs to run.
 type Config struct {
-	BotToken     string
-	Port         string
-	WebhookURL   string
+	// BotToken is the Telegram Bot API token.
+	BotToken string
+	// Port is the local TCP port the HTTP server listens on.
+	Port string
+	// WebhookURL is the public HTTPS URL Telegram POSTs updates to.
+	WebhookURL string
+	// RenderURL is the public base URL of the service (e.g. on Render.com).
+	// Used to construct WebApp deep-links sent to users.
+	RenderURL string
+	// DatabasePath is the filesystem path for the SQLite database file.
 	DatabasePath string
-	RenderURL    string
 }
 
-// Load loads configuration from environment variables with sensible defaults.
-func Load() *Config {
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
+const defaultPort = "8080"
+const defaultDB = "./data/bot.db"
 
-	dbPath := os.Getenv("DATABASE_PATH")
-	if dbPath == "" {
-		dbPath = "./data/bot.db"
-	}
-
-	webhookURL := os.Getenv("WEBHOOK_URL")
-	if webhookURL == "" {
-		webhookURL = os.Getenv("RENDER_EXTERNAL_URL")
-	}
-	if webhookURL == "" {
-		webhookURL = os.Getenv("RENDER_URL")
-	}
-
-	var renderURL string
-	if webhookURL != "" {
-		renderURL = strings.TrimSuffix(webhookURL, "/")
-	} else {
-		renderURL = "http://localhost:" + port
-	}
-
-	return &Config{
+// Load reads all required and optional env vars and returns a Config.
+// Only BOT_TOKEN is strictly required; everything else has a safe default.
+func Load() (*Config, error) {
+	cfg := &Config{
 		BotToken:     os.Getenv("BOT_TOKEN"),
-		Port:         port,
-		WebhookURL:   webhookURL,
-		DatabasePath: dbPath,
-		RenderURL:    renderURL,
+		Port:         os.Getenv("PORT"),
+		WebhookURL:   os.Getenv("WEBHOOK_URL"),
+		RenderURL:    coalesce("RENDER_EXTERNAL_URL", "RENDER_URL"),
+		DatabasePath: os.Getenv("DATABASE_PATH"),
 	}
+
+	if cfg.BotToken == "" {
+		return nil, fmt.Errorf("config: BOT_TOKEN environment variable is required")
+	}
+	if cfg.Port == "" {
+		cfg.Port = defaultPort
+	}
+	if cfg.DatabasePath == "" {
+		cfg.DatabasePath = defaultDB
+	}
+	// Normalise RenderURL: strip trailing slash so callers can always do cfg.RenderURL+"/app".
+	cfg.RenderURL = strings.TrimSuffix(cfg.RenderURL, "/")
+
+	return cfg, nil
+}
+
+// coalesce returns the value of the first non-empty env var in the list.
+func coalesce(keys ...string) string {
+	for _, k := range keys {
+		if v := os.Getenv(k); v != "" {
+			return v
+		}
+	}
+	return ""
 }

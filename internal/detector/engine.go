@@ -1,3 +1,6 @@
+// Package detector implements the cluster detection engine that watches swap
+// events and fires alerts when multiple wallets accumulate the same token
+// within a rolling time window.
 package detector
 
 import (
@@ -5,7 +8,7 @@ import (
 	"time"
 )
 
-// SwapEvent represents a single token swap event from a DEX feed.
+// SwapEvent represents a single on-chain token swap captured from a DEX feed.
 type SwapEvent struct {
 	TokenAddress  string
 	TokenSymbol   string
@@ -16,107 +19,116 @@ type SwapEvent struct {
 	Timestamp     time.Time
 }
 
-// ClusterAlert represents a detected cluster alert for a specific token.
+// ClusterAlert is emitted when the engine detects a meaningful accumulation
+// pattern that should be broadcast to subscribers.
 type ClusterAlert struct {
 	TokenAddress      string
 	TokenSymbol       string
 	Chain             string
-	BuyCount          int // number of unique wallets
+	BuyCount          int
 	TotalVolumeUSD    float64
 	TimeWindowSeconds int
-	TxHashes          []string
+	// LeadWallet is the wallet with the highest individual buy in this cluster.
+	LeadWallet string
 }
 
-// ClusterEngine evaluates incoming swap events against a sliding window and emits alerts.
+// tokenBucket collects swap events for a single token within the time window.
+type tokenBucket struct {
+	events   []SwapEvent
+	cooldown time.Time // no alerts before this time
+}
+
+// ClusterEngine processes swap events and emits ClusterAlerts when thresholds
+// are exceeded. It is safe for concurrent use.
 type ClusterEngine struct {
-	mu           sync.Mutex
-	events       []SwapEvent
-	minWallets   int
-	minVolumeUSD float64
-	timeWindow   time.Duration
-	cooldown     time.Duration
-	lastAlerts   map[string]time.Time // TokenAddress -> last alert timestamp
-	AlertsChan   chan ClusterAlert
+	mu         sync.Mutex
+	buckets    map[string]*tokenBucket // keyed by "chain:tokenAddress"
+	minWallets int
+	minVolume  float64
+	window     time.Duration
+	cooldown   time.Duration
+	AlertsChan chan ClusterAlert
 }
 
-// NewClusterEngine creates a new ClusterEngine with given parameters.
-func NewClusterEngine(minWallets int, minVolumeUSD float64, timeWindow time.Duration, cooldown time.Duration) *ClusterEngine {
+// NewClusterEngine constructs a ClusterEngine.
+//
+//   - minWallets  – minimum distinct wallets to trigger an alert
+//   - minVolume   – minimum aggregated USD volume to trigger an alert
+//   - window      – rolling time window for accumulation
+//   - cooldown    – minimum gap between repeated alerts for the same token
+func NewClusterEngine(minWallets int, minVolume float64, window, cooldown time.Duration) *ClusterEngine {
 	return &ClusterEngine{
-		minWallets:   minWallets,
-		minVolumeUSD: minVolumeUSD,
-		timeWindow:   timeWindow,
-		cooldown:     cooldown,
-		lastAlerts:   make(map[string]time.Time),
-		AlertsChan:   make(chan ClusterAlert, 100),
+		buckets:    make(map[string]*tokenBucket),
+		minWallets: minWallets,
+		minVolume:  minVolume,
+		window:     window,
+		cooldown:   cooldown,
+		AlertsChan: make(chan ClusterAlert, 64),
 	}
 }
 
-// ProcessSwap adds an event, cleans old events, checks cluster conditions, and emits alerts.
-func (e *ClusterEngine) ProcessSwap(event SwapEvent) {
+// ProcessSwap ingests a single swap event and, if it causes a cluster to cross
+// the detection thresholds, emits a ClusterAlert on AlertsChan.
+func (e *ClusterEngine) ProcessSwap(ev SwapEvent) {
+	key := ev.Chain + ":" + ev.TokenAddress
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	now := time.Now()
-	if event.Timestamp.IsZero() {
-		event.Timestamp = now
+	b, ok := e.buckets[key]
+	if !ok {
+		b = &tokenBucket{}
+		e.buckets[key] = b
 	}
 
-	// Append event
-	e.events = append(e.events, event)
-
-	// Clean up events outside the time window
-	cutoff := now.Add(-e.timeWindow)
-	validEvents := make([]SwapEvent, 0, len(e.events))
-	for _, ev := range e.events {
-		if ev.Timestamp.After(cutoff) {
-			validEvents = append(validEvents, ev)
+	// Append and immediately prune events outside the window.
+	b.events = append(b.events, ev)
+	cutoff := time.Now().UTC().Add(-e.window)
+	fresh := b.events[:0]
+	for _, fe := range b.events {
+		if fe.Timestamp.After(cutoff) {
+			fresh = append(fresh, fe)
 		}
 	}
-	e.events = validEvents
+	b.events = fresh
 
-	// Group/evaluate by TokenAddress & Chain
-	// We want to check cluster conditions for the token of the incoming event (or all tokens in window).
-	// Let's check specifically for the event's TokenAddress to be efficient.
-	targetToken := event.TokenAddress
-	targetChain := event.Chain
-
-	uniqueWallets := make(map[string]bool)
+	// Count distinct wallets and total volume.
+	walletSet := make(map[string]struct{}, len(b.events))
 	var totalVolume float64
-	var txHashes []string
-	var tokenSymbol string
+	var leadWallet string
+	var leadAmt float64
 
-	for _, ev := range e.events {
-		if ev.TokenAddress == targetToken && ev.Chain == targetChain {
-			uniqueWallets[ev.WalletAddress] = true
-			totalVolume += ev.AmountUSD
-			txHashes = append(txHashes, ev.TxHash)
-			tokenSymbol = ev.TokenSymbol
+	for _, fe := range b.events {
+		walletSet[fe.WalletAddress] = struct{}{}
+		totalVolume += fe.AmountUSD
+		if fe.AmountUSD > leadAmt {
+			leadAmt = fe.AmountUSD
+			leadWallet = fe.WalletAddress
 		}
 	}
 
-	// Check criteria
-	if len(uniqueWallets) >= e.minWallets && totalVolume >= e.minVolumeUSD {
-		// Check cooldown
-		lastTime, exists := e.lastAlerts[targetToken]
-		if !exists || now.Sub(lastTime) > e.cooldown {
-			e.lastAlerts[targetToken] = now
+	// Check thresholds and cooldown.
+	if len(walletSet) < e.minWallets || totalVolume < e.minVolume {
+		return
+	}
+	if time.Now().UTC().Before(b.cooldown) {
+		return
+	}
+	b.cooldown = time.Now().UTC().Add(e.cooldown)
 
-			alert := ClusterAlert{
-				TokenAddress:      targetToken,
-				TokenSymbol:       tokenSymbol,
-				Chain:             targetChain,
-				BuyCount:          len(uniqueWallets),
-				TotalVolumeUSD:    totalVolume,
-				TimeWindowSeconds: int(e.timeWindow.Seconds()),
-				TxHashes:          txHashes,
-			}
+	alert := ClusterAlert{
+		TokenAddress:      ev.TokenAddress,
+		TokenSymbol:       ev.TokenSymbol,
+		Chain:             ev.Chain,
+		BuyCount:          len(b.events),
+		TotalVolumeUSD:    totalVolume,
+		TimeWindowSeconds: int(e.window.Seconds()),
+		LeadWallet:        leadWallet,
+	}
 
-			// Non-blocking send or buffered send
-			select {
-			case e.AlertsChan <- alert:
-			default:
-				// Channel full, drop or skip
-			}
-		}
+	// Non-blocking send: drop if channel is full to avoid stalling the caller.
+	select {
+	case e.AlertsChan <- alert:
+	default:
 	}
 }

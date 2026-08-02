@@ -20,6 +20,14 @@ var (
 	once         sync.Once
 )
 
+// Load is an alias or wrapper for Init that returns a *Bundle, matching the expected signature.
+func Load(localesDir string) (*Bundle, error) {
+	if err := Init(localesDir); err != nil {
+		return nil, err
+	}
+	return globalBundle, nil
+}
+
 // Init initializes the global i18n bundle by loading locale files from the given directory.
 func Init(localesDir string) error {
 	var err error

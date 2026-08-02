@@ -1,3 +1,14 @@
+// Command bot is the entrypoint for smart-cluster-bot.
+//
+// Start-up sequence:
+//  1. Load config from environment variables.
+//  2. Load i18n locale files.
+//  3. Open SQLite database and run schema migrations.
+//  4. Connect Telegram client + register webhook.
+//  5. Start cluster detection engine and mock DEX feed.
+//  6. Start alert broadcaster (engine → Telegram users).
+//  7. Start daily digest scheduler.
+//  8. Register HTTP routes and serve.
 package main
 
 import (
@@ -17,94 +28,126 @@ import (
 )
 
 func main() {
-	// 1. Load configuration
-	cfg := config.Load()
-
-	// 2. Initialize i18n
-	if err := i18n.Init("./locales"); err != nil {
-		log.Fatalf("FATAL: Failed to initialize i18n: %v", err)
+	// ── 1. Config ──────────────────────────────────────────────────────────────
+	cfg, err := config.Load()
+	if err != nil {
+		log.Fatalf("FATAL: config: %v", err)
 	}
 
-	// 3. Initialize Database Storage
+	// ── 2. i18n ────────────────────────────────────────────────────────────────
+	bundle, err := i18n.Load("locales")
+	if err != nil {
+		log.Fatalf("FATAL: i18n: %v", err)
+	}
+
+	// ── 3. Database ────────────────────────────────────────────────────────────
 	db, err := storage.InitDB(cfg.DatabasePath)
 	if err != nil {
-		log.Fatalf("FATAL: Failed to initialize database: %v", err)
+		log.Fatalf("FATAL: storage: %v", err)
 	}
 
-	// 4. Initialize Telegram client
+	// ── 4. Telegram client ─────────────────────────────────────────────────────
 	tgClient := telegram.NewClient(cfg.BotToken)
 
-	// Set Telegram Chat Menu Button to open WebApp
-	go func() {
-		time.Sleep(3 * time.Second) // slight delay to ensure bot startup
-		webAppURL := cfg.RenderURL + "/app"
-		if err := tgClient.SetChatMenuButton(webAppURL); err != nil {
-			log.Printf("WARNING: failed to set chat menu button: %v", err)
+	if cfg.WebhookURL != "" {
+		if err := tgClient.SetWebhook(cfg.WebhookURL); err != nil {
+			log.Printf("WARNING: setWebhook: %v", err)
 		} else {
-			log.Printf("INFO: successfully set Telegram chat menu button to %s", webAppURL)
+			log.Printf("INFO: webhook registered → %s", cfg.WebhookURL)
 		}
-	}()
+	}
 
-	// 5. Initialize Cluster Detector Engine
-	// Parameters: minWallets = 3, minVolumeUSD = 10000, timeWindow = 300s, cooldown = 60s
-	clusterEngine := detector.NewClusterEngine(3, 10000.0, 300*time.Second, 60*time.Second)
+	// Set the chat menu button to open the WebApp (deferred so the bot is
+	// fully ready before we hit the API).
+	if cfg.RenderURL != "" {
+		go func() {
+			time.Sleep(3 * time.Second)
+			if err := tgClient.SetChatMenuButton(cfg.RenderURL + "/app"); err != nil {
+				log.Printf("WARNING: SetChatMenuButton: %v", err)
+			} else {
+				log.Printf("INFO: chat menu button → %s/app", cfg.RenderURL)
+			}
+		}()
+	}
 
-	// 6. Start DEX Mock Feed Worker with 15 minutes interval
+	// ── 5. Cluster detection engine ────────────────────────────────────────────
+	// Parameters: ≥3 distinct wallets, ≥$10 000 aggregate volume,
+	// 5-minute rolling window, 60-second alert cooldown per token.
+	engine := detector.NewClusterEngine(3, 10_000.0, 5*time.Minute, 60*time.Second)
+
 	ctx := context.Background()
-	detector.StartMockFeed(ctx, clusterEngine, 15*time.Minute)
 
-	// 7. Start Alert Broadcaster worker
-	telegram.StartAlertBroadcaster(ctx, tgClient, db, clusterEngine.AlertsChan)
+	// Start mock DEX feed (replace with a real feed adapter in production).
+	detector.StartMockFeed(ctx, engine, 15*time.Minute)
 
-	// 8. Initialize webhook handler with storage
-	webhookHandler := telegram.NewWebhookHandler(tgClient, db, cfg)
+	// ── 6. Alert broadcaster ───────────────────────────────────────────────────
+	telegram.StartAlertBroadcaster(ctx, tgClient, db, engine.AlertsChan)
 
-	// 9. Register HTTP routes
+	// ── 7. Daily digest ────────────────────────────────────────────────────────
+	telegram.StartDailyDigest(ctx, tgClient, db)
+
+	// ── 8. HTTP routes ─────────────────────────────────────────────────────────
+	webhookHandler := telegram.NewWebhookHandler(tgClient, db, cfg, bundle)
+
 	mux := http.NewServeMux()
-	mux.Handle("/", webhookHandler)
+
+	// Telegram webhook endpoint.
 	mux.Handle("/webhook", webhookHandler)
+
+	// Also accept updates on / for setups where Telegram is pointed at the root.
+	mux.Handle("/", webhookHandler)
+
+	// Health check (used by Render / load balancers).
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
 
-	// Setup embed static file server for /app and /app/
+	// WebApp static files embedded in the binary.
 	fileServer := http.FileServer(http.FS(web.WebFS))
-
 	mux.Handle("/app/", http.StripPrefix("/app/", fileServer))
 	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
-		indexHTML, err := fs.ReadFile(web.WebFS, "index.html")
+		data, err := fs.ReadFile(web.WebFS, "index.html")
 		if err != nil {
-			log.Printf("ERROR: failed to read embedded index.html: %v", err)
 			http.Error(w, "Not Found", http.StatusNotFound)
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(indexHTML)
+		w.Write(data)
 	})
 
-	// API endpoint returning cluster history as JSON
+	// REST API: recent clusters (consumed by the WebApp).
 	mux.HandleFunc("/api/clusters", func(w http.ResponseWriter, r *http.Request) {
 		clusters, err := db.GetRecentClusters(50)
 		if err != nil {
-			log.Printf("ERROR: failed to get recent clusters for API: %v", err)
+			log.Printf("ERROR: /api/clusters: %v", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
+		if clusters == nil {
+			clusters = []storage.ClusterRecord{}
+		}
 		_ = json.NewEncoder(w).Encode(clusters)
 	})
 
-	// 10. Start server
+	// REST API: 24h stats (consumed by the WebApp dashboard).
+	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
+		stats, err := db.GetStats24h()
+		if err != nil {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(stats)
+	})
+
 	addr := ":" + cfg.Port
-	baseURL := cfg.RenderURL
-	if baseURL == "" {
-		baseURL = "http://localhost" + addr
+	log.Printf("INFO: smart-cluster-bot listening on %s", addr)
+	if cfg.RenderURL != "" {
+		log.Printf("INFO: WebApp → %s/app", cfg.RenderURL)
 	}
-	log.Printf("[WEBAPP] Serving WebApp at: %s/app", baseURL)
-	log.Printf("INFO: Starting smart-cluster-bot server on port %s...", cfg.Port)
 	if err := http.ListenAndServe(addr, mux); err != nil {
-		log.Fatalf("FATAL: Server failed: %v", err)
+		log.Fatalf("FATAL: server: %v", err)
 	}
 }
