@@ -4,10 +4,13 @@ FROM golang:1.22-alpine AS builder
 WORKDIR /app
 
 # Copy dependency manifests
-COPY go.mod ./
+COPY go.mod go.sum ./
 
 # Copy source code
 COPY . .
+
+# Set GOTOOLCHAIN=auto to allow automatic toolchain management if needed
+ENV GOTOOLCHAIN=auto
 
 # Build statically linked binary
 RUN CGO_ENABLED=0 GOOS=linux go build -o /bot cmd/bot/main.go
