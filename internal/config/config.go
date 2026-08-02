@@ -2,6 +2,7 @@ package config
 
 import (
 	"os"
+	"strings"
 )
 
 // Config holds all configuration values for the application.
@@ -25,18 +26,25 @@ func Load() *Config {
 		dbPath = "./data/bot.db"
 	}
 
-	renderURL := os.Getenv("RENDER_URL")
-	if renderURL == "" {
-		renderURL = os.Getenv("WEBHOOK_URL")
-		if renderURL == "" {
-			renderURL = "https://smart-cluster-bot.onrender.com"
-		}
+	webhookURL := os.Getenv("WEBHOOK_URL")
+	if webhookURL == "" {
+		webhookURL = os.Getenv("RENDER_EXTERNAL_URL")
+	}
+	if webhookURL == "" {
+		webhookURL = os.Getenv("RENDER_URL")
+	}
+
+	var renderURL string
+	if webhookURL != "" {
+		renderURL = strings.TrimSuffix(webhookURL, "/")
+	} else {
+		renderURL = "http://localhost:" + port
 	}
 
 	return &Config{
 		BotToken:     os.Getenv("BOT_TOKEN"),
 		Port:         port,
-		WebhookURL:   os.Getenv("WEBHOOK_URL"),
+		WebhookURL:   webhookURL,
 		DatabasePath: dbPath,
 		RenderURL:    renderURL,
 	}

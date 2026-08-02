@@ -4,7 +4,10 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os"
+	"strings"
 
+	"smart-cluster-bot/internal/config"
 	"smart-cluster-bot/internal/i18n"
 	"smart-cluster-bot/internal/storage"
 )
@@ -13,13 +16,15 @@ import (
 type WebhookHandler struct {
 	client  *Client
 	storage *storage.Storage
+	config  *config.Config
 }
 
 // NewWebhookHandler creates a new WebhookHandler instance.
-func NewWebhookHandler(client *Client, store *storage.Storage) *WebhookHandler {
+func NewWebhookHandler(client *Client, store *storage.Storage, cfg *config.Config) *WebhookHandler {
 	return &WebhookHandler{
 		client:  client,
 		storage: store,
+		config:  cfg,
 	}
 }
 
@@ -85,14 +90,28 @@ func (h *WebhookHandler) handleUpdate(update *Update) {
 		responseText := welcome + "\n\n" + chooseLang
 
 		// Include inline keyboard button with web_app
-		renderURL := "https://smart-cluster-bot.onrender.com"
+		webAppURL := "http://localhost:8080/app"
+		if h.config != nil && h.config.RenderURL != "" {
+			webAppURL = h.config.RenderURL + "/app"
+		} else {
+			webhookURL := os.Getenv("WEBHOOK_URL")
+			if webhookURL == "" {
+				webhookURL = os.Getenv("RENDER_EXTERNAL_URL")
+			}
+			if webhookURL == "" {
+				webhookURL = os.Getenv("RENDER_URL")
+			}
+			if webhookURL != "" {
+				webAppURL = strings.TrimSuffix(webhookURL, "/") + "/app"
+			}
+		}
 		replyMarkup := &InlineKeyboardMarkup{
 			InlineKeyboard: [][]InlineKeyboardButton{
 				{
 					{
 						Text: "📊 Открыть WebApp",
 						WebApp: &WebAppInfo{
-							URL: renderURL + "/app",
+							URL: webAppURL,
 						},
 					},
 				},

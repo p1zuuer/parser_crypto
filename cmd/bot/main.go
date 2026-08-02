@@ -55,7 +55,7 @@ func main() {
 	telegram.StartAlertBroadcaster(ctx, tgClient, db, clusterEngine.AlertsChan)
 
 	// 8. Initialize webhook handler with storage
-	webhookHandler := telegram.NewWebhookHandler(tgClient, db)
+	webhookHandler := telegram.NewWebhookHandler(tgClient, db, cfg)
 
 	// 9. Register HTTP routes
 	mux := http.NewServeMux()
