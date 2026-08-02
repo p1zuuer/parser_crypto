@@ -3,6 +3,7 @@ package telegram
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"strconv"
@@ -12,8 +13,6 @@ import (
 	"smart-cluster-bot/internal/i18n"
 	"smart-cluster-bot/internal/storage"
 )
-
-// ── WebhookHandler ─────────────────────────────────────────────────────────────
 
 // WebhookHandler is an http.Handler that receives Telegram webhook updates,
 // immediately returns 200 OK, then processes the update asynchronously.
@@ -48,9 +47,7 @@ func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Respond fast — Telegram retries if we don't reply within a few seconds.
 	w.WriteHeader(http.StatusOK)
-
 	go h.dispatch(&update)
 }
 
@@ -73,8 +70,12 @@ func (h *WebhookHandler) handleMessage(msg *Message) {
 	if lang == "" {
 		lang = "en"
 	}
+	if strings.HasPrefix(strings.ToLower(lang), "ru") {
+		lang = "ru"
+	} else {
+		lang = "en" // Default to English as required
+	}
 
-	// Ensure user exists in DB.
 	user, err := h.storage.GetOrCreateUser(from.ID, from.Username, lang)
 	if err != nil {
 		log.Printf("[HANDLER] GetOrCreateUser %d: %v", from.ID, err)
@@ -88,19 +89,18 @@ func (h *WebhookHandler) handleMessage(msg *Message) {
 		h.sendStartMenu(chatID, from.FirstName, user)
 
 	case strings.HasPrefix(text, "/watch"):
-		h.handleWatchCommand(chatID, from.ID, text)
+		h.handleWatchCommand(chatID, from.ID, text, user.Language)
 
 	case text == "/watchlist":
-		h.sendWatchlistMenu(chatID, from.ID)
+		h.sendWatchlistMenu(chatID, from.ID, user.Language)
 
 	case text == "/stats":
-		h.sendStats24h(chatID)
+		h.sendStats24h(chatID, user.Language)
 
 	case text == "/hot":
-		h.sendHotWallets(chatID)
+		h.sendHotWallets(chatID, user.Language)
 
 	default:
-		// Unknown command — show the main menu.
 		h.sendStartMenu(chatID, from.FirstName, user)
 	}
 }
@@ -113,42 +113,61 @@ func (h *WebhookHandler) sendStartMenu(chatID int64, firstName string, user *sto
 		plan = "👑 VIP"
 	}
 
-	_ = h.i18n // available for future localisation of menu strings
+	lang := user.Language
 	webAppURL := h.webAppURL()
 
-	body := fmt.Sprintf(
-		"👋 *Привет, %s\\!*\n\n"+
-			"📊 *Smart Cluster Terminal*\n"+
-			"Отслеживание умных денег в реальном времени\\.\n\n"+
-			"👤 План: *%s*\n"+
-			"🔔 Мин\\. объём: *$%s*\n"+
-			"🌐 Сети: %s\n\n"+
-			"Выберите действие:",
-		escMD(firstName),
-		escMD(plan),
-		fmtVolume(user.MinVolume),
-		enabledNetworks(user),
-	)
+	var body string
+	if lang == "ru" {
+		body = fmt.Sprintf(
+			"👋 <b>Привет, %s!</b>\n\n"+
+				"📊 <b>Smart Cluster Terminal</b>\n"+
+				"Аналитика и безопасность смарт-денег в реальном времени.\n\n"+
+				"👤 План: <b>%s</b>\n"+
+				"🔔 Мин. объём: <b>$%s</b>\n"+
+				"🌐 Сети: %s\n"+
+				"🌐 Язык: <b>Русский (RU)</b>\n\n"+
+				"Выберите действие:",
+			html.EscapeString(firstName),
+			html.EscapeString(plan),
+			fmtVolume(user.MinVolume),
+			enabledNetworks(user),
+		)
+	} else {
+		body = fmt.Sprintf(
+			"👋 <b>Hello, %s!</b>\n\n"+
+				"📊 <b>Smart Cluster Terminal</b>\n"+
+				"Real-time Smart Money Analytics & Security.\n\n"+
+				"👤 Plan: <b>%s</b>\n"+
+				"🔔 Min Volume: <b>$%s</b>\n"+
+				"🌐 Networks: %s\n"+
+				"🌐 Language: <b>English (EN)</b>\n\n"+
+				"Choose an action:",
+			html.EscapeString(firstName),
+			html.EscapeString(plan),
+			fmtVolume(user.MinVolume),
+			enabledNetworks(user),
+		)
+	}
 
 	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
-				{Text: "📊 Открыть Terminal", WebApp: &WebAppInfo{URL: webAppURL}},
+				{Text: tr(lang, "📊 Open Terminal", "📊 Открыть Terminal"), WebApp: &WebAppInfo{URL: webAppURL}},
 			},
 			{
-				{Text: "🔥 Свежие кластеры", CallbackData: "cb:clusters"},
-				{Text: "📈 Статистика 24h", CallbackData: "cb:stats"},
+				{Text: tr(lang, "🔥 Fresh Clusters", "🔥 Свежие кластеры"), CallbackData: "cb:clusters"},
+				{Text: "📈 24h Stats", CallbackData: "cb:stats"},
 			},
 			{
-				{Text: "⭐ Мой Watchlist", CallbackData: "cb:watchlist"},
-				{Text: "⚙️ Настройки", CallbackData: "cb:settings"},
+				{Text: tr(lang, "⭐ My Watchlist", "⭐ Мой Watchlist"), CallbackData: "cb:watchlist"},
+				{Text: tr(lang, "⚙️ Settings", "⚙️ Настройки"), CallbackData: "cb:settings"},
 			},
 			{
-				{Text: "🔥 Горячие кошельки", CallbackData: "cb:hot"},
-				{Text: "❓ Помощь", CallbackData: "cb:help"},
+				{Text: tr(lang, "🔥 Hot Wallets", "🔥 Горячие кошельки"), CallbackData: "cb:hot"},
+				{Text: tr(lang, "❓ Help", "❓ Помощь"), CallbackData: "cb:help"},
 			},
 			{
-				{Text: "👑 VIP Пасс", CallbackData: "cb:vip"},
+				{Text: tr(lang, "👑 VIP Pass", "👑 VIP Пасс"), CallbackData: "cb:vip"},
 			},
 		},
 	}
@@ -160,14 +179,18 @@ func (h *WebhookHandler) sendStartMenu(chatID int64, firstName string, user *sto
 
 // ── /watch command ─────────────────────────────────────────────────────────────
 
-// handleWatchCommand parses "/watch <address> [note...]" and adds the wallet to
-// the user's watchlist.
-func (h *WebhookHandler) handleWatchCommand(chatID, userID int64, text string) {
+func (h *WebhookHandler) handleWatchCommand(chatID, userID int64, text, lang string) {
 	parts := strings.Fields(text)
 	if len(parts) < 2 {
-		h.client.SendMessage(chatID,
-			"ℹ️ Usage: `/watch <wallet_address> [optional note]`\n\n"+
-				"Example:\n`/watch 0xABCDEF... big whale`")
+		if lang == "ru" {
+			h.client.SendMessage(chatID,
+				"ℹ️ Использование: <code>/watch <wallet_address> [заметка]</code>\n\n"+
+					"Пример:\n<code>/watch 0xABCDEF... кит</code>")
+		} else {
+			h.client.SendMessage(chatID,
+				"ℹ️ Usage: <code>/watch <wallet_address> [optional note]</code>\n\n"+
+					"Example:\n<code>/watch 0xABCDEF... big whale</code>")
+		}
 		return
 	}
 	addr := parts[1]
@@ -175,116 +198,168 @@ func (h *WebhookHandler) handleWatchCommand(chatID, userID int64, text string) {
 
 	if err := h.storage.AddWatchlistWallet(userID, addr, note); err != nil {
 		log.Printf("[HANDLER] AddWatchlistWallet %d: %v", userID, err)
-		h.client.SendMessage(chatID, "❌ Не удалось добавить кошелёк. Попробуйте позже.")
+		msg := "❌ Failed to add wallet. Please try again later."
+		if lang == "ru" {
+			msg = "❌ Не удалось добавить кошелёк. Попробуйте позже."
+		}
+		h.client.SendMessage(chatID, msg)
 		return
 	}
 
-	reply := fmt.Sprintf(
-		"✅ *Кошелёк добавлен в Watchlist\\!*\n\n"+
-			"`%s`\n"+
-			"📝 Заметка: %s\n\n"+
-			"Вы получите уведомление, как только этот кошелёк купит что-нибудь\\.",
-		escMD(addr),
-		escMD(or(note, "—")),
-	)
-	h.client.SendMessageWithKeyboard(chatID, reply, backToMenuKB())
+	var reply string
+	if lang == "ru" {
+		reply = fmt.Sprintf(
+			"✅ <b>Кошелёк добавлен в Watchlist!</b>\n\n"+
+				"<code>%s</code>\n"+
+				"📝 Заметка: %s\n\n"+
+				"Вы получите уведомление, как только этот кошелёк купит что-нибудь.",
+			html.EscapeString(addr),
+			html.EscapeString(or(note, "—")),
+		)
+	} else {
+		reply = fmt.Sprintf(
+			"✅ <b>Wallet added to Watchlist!</b>\n\n"+
+				"<code>%s</code>\n"+
+				"📝 Note: %s\n\n"+
+				"You will receive an alert as soon as this wallet makes a purchase.",
+			html.EscapeString(addr),
+			html.EscapeString(or(note, "—")),
+		)
+	}
+	h.client.SendMessageWithKeyboard(chatID, reply, backToMenuKB(lang))
 }
 
 // ── Watchlist menu ─────────────────────────────────────────────────────────────
 
-func (h *WebhookHandler) sendWatchlistMenu(chatID, userID int64) {
+func (h *WebhookHandler) sendWatchlistMenu(chatID, userID int64, lang string) {
 	entries, err := h.storage.GetWatchlist(userID)
 	if err != nil {
 		log.Printf("[HANDLER] GetWatchlist %d: %v", userID, err)
-		h.client.SendMessage(chatID, "❌ Ошибка загрузки watchlist.")
+		h.client.SendMessage(chatID, "❌ Error loading watchlist.")
 		return
 	}
 
 	if len(entries) == 0 {
-		h.client.SendMessageWithKeyboard(chatID,
-			"⭐ *Мой Watchlist*\n\nСписок пуст\\.\n\n"+
-				"Добавьте кошелёк командой:\n`/watch <address> [заметка]`",
-			backToMenuKB(),
-		)
+		msg := "⭐ <b>My Watchlist</b>\n\nYour list is empty.\n\nAdd a wallet using:\n<code>/watch <address> [note]</code>"
+		if lang == "ru" {
+			msg = "⭐ <b>Мой Watchlist</b>\n\nСписок пуст.\n\nДобавьте кошелёк командой:\n<code>/watch <address> [заметка]</code>"
+		}
+		h.client.SendMessageWithKeyboard(chatID, msg, backToMenuKB(lang))
 		return
 	}
 
 	var sb strings.Builder
-	sb.WriteString("⭐ *Мой Watchlist*\n\n")
+	if lang == "ru" {
+		sb.WriteString("⭐ <b>Мой Watchlist</b>\n\n")
+	} else {
+		sb.WriteString("⭐ <b>My Watchlist</b>\n\n")
+	}
 
-	// Build remove buttons (one per row).
 	var rows [][]InlineKeyboardButton
 	for _, e := range entries {
 		masked := maskAddr(e.WalletAddress)
-		sb.WriteString("• `")
-		sb.WriteString(escMD(masked))
-		sb.WriteString("`")
+		sb.WriteString("• <code>")
+		sb.WriteString(html.EscapeString(masked))
+		sb.WriteString("</code>")
 		if e.Note != "" {
 			sb.WriteString(" — ")
-			sb.WriteString(escMD(e.Note))
+			sb.WriteString(html.EscapeString(e.Note))
 		}
 		sb.WriteString("\n")
 
+		delText := "🗑 Remove " + masked
+		if lang == "ru" {
+			delText = "🗑 Удалить " + masked
+		}
 		rows = append(rows, []InlineKeyboardButton{
 			{
-				Text:         "🗑 Удалить " + masked,
+				Text:         delText,
 				CallbackData: fmt.Sprintf("cb:watchrm:%d", e.ID),
 			},
 		})
 	}
-	sb.WriteString("\nНажмите кнопку чтобы удалить запись\\.")
+	if lang == "ru" {
+		sb.WriteString("\nНажмите кнопку чтобы удалить запись.")
+	} else {
+		sb.WriteString("\nTap a button to remove an entry.")
+	}
 
+	backText := "⬅️ Back"
+	if lang == "ru" {
+		backText = "⬅️ Назад"
+	}
 	rows = append(rows, []InlineKeyboardButton{
-		{Text: "⬅️ Назад", CallbackData: "cb:menu"},
+		{Text: backText, CallbackData: "cb:menu"},
 	})
 	h.client.SendMessageWithKeyboard(chatID, sb.String(), &InlineKeyboardMarkup{InlineKeyboard: rows})
 }
 
 // ── Stats 24h ──────────────────────────────────────────────────────────────────
 
-func (h *WebhookHandler) sendStats24h(chatID int64) {
+func (h *WebhookHandler) sendStats24h(chatID int64, lang string) {
 	stats, err := h.storage.GetStats24h()
 	if err != nil {
 		log.Printf("[HANDLER] GetStats24h: %v", err)
-		h.client.SendMessage(chatID, "❌ Ошибка загрузки статистики.")
+		h.client.SendMessage(chatID, "❌ Error loading statistics.")
 		return
 	}
 
-	body := fmt.Sprintf(
-		"📈 *Статистика за 24 часа*\n\n"+
-			"🔢 Кластеров обнаружено: *%d*\n"+
-			"💰 Общий объём: *$%s*\n"+
-			"🏆 Топ токен: *%s*\n"+
-			"🌐 Активная сеть: *%s*",
-		stats.TotalClusters,
-		fmtFloat(stats.TotalVolumeUSD),
-		escMD(or(stats.TopToken, "—")),
-		escMD(or(stats.TopChain, "—")),
-	)
-	h.client.SendMessageWithKeyboard(chatID, body, backToMenuKB())
+	var body string
+	if lang == "ru" {
+		body = fmt.Sprintf(
+			"📈 <b>Статистика за 24 часа</b>\n\n"+
+				"🔢 Кластеров обнаружено: <b>%d</b>\n"+
+				"💰 Общий объём: <b>$%s</b>\n"+
+				"🏆 Топ токен: <b>%s</b>\n"+
+				"🌐 Активная сеть: <b>%s</b>",
+			stats.TotalClusters,
+			fmtFloat(stats.TotalVolumeUSD),
+			html.EscapeString(or(stats.TopToken, "—")),
+			html.EscapeString(or(stats.TopChain, "—")),
+		)
+	} else {
+		body = fmt.Sprintf(
+			"📈 <b>24h Statistics</b>\n\n"+
+				"🔢 Clusters Detected: <b>%d</b>\n"+
+				"💰 Total Volume: <b>$%s</b>\n"+
+				"🏆 Top Token: <b>%s</b>\n"+
+				"🌐 Top Chain: <b>%s</b>",
+			stats.TotalClusters,
+			fmtFloat(stats.TotalVolumeUSD),
+			html.EscapeString(or(stats.TopToken, "—")),
+			html.EscapeString(or(stats.TopChain, "—")),
+		)
+	}
+	h.client.SendMessageWithKeyboard(chatID, body, backToMenuKB(lang))
 }
 
 // ── Hot wallets ─────────────────────────────────────────────────────────────────
 
-func (h *WebhookHandler) sendHotWallets(chatID int64) {
+func (h *WebhookHandler) sendHotWallets(chatID int64, lang string) {
 	wallets, err := h.storage.GetTopWallets(24, 5)
 	if err != nil {
 		log.Printf("[HANDLER] GetTopWallets: %v", err)
-		h.client.SendMessage(chatID, "❌ Ошибка загрузки горячих кошельков.")
+		h.client.SendMessage(chatID, "❌ Error loading hot wallets.")
 		return
 	}
 
 	if len(wallets) == 0 {
-		h.client.SendMessageWithKeyboard(chatID,
-			"🔥 *Горячие кошельки*\n\nДанных пока нет\\.",
-			backToMenuKB(),
-		)
+		msg := "🔥 <b>Hot Wallets</b>\n\nNo data available yet."
+		if lang == "ru" {
+			msg = "🔥 <b>Горячие кошельки</b>\n\nДанных пока нет."
+		}
+		h.client.SendMessageWithKeyboard(chatID, msg, backToMenuKB(lang))
 		return
 	}
 
 	var sb strings.Builder
-	sb.WriteString("🔥 *Горячие кошельки — 24h*\n")
-	sb.WriteString("_Кошельки, появляющиеся в наибольшем числе кластеров_\n\n")
+	if lang == "ru" {
+		sb.WriteString("🔥 <b>Горячие кошельки — 24h</b>\n")
+		sb.WriteString("<i>Кошельки, появляющиеся в наибольшем числе кластеров</i>\n\n")
+	} else {
+		sb.WriteString("🔥 <b>Hot Wallets — 24h</b>\n")
+		sb.WriteString("<i>Wallets appearing in the most clusters</i>\n\n")
+	}
 
 	medals := []string{"🥇", "🥈", "🥉", "4️⃣", "5️⃣"}
 	for i, w := range wallets {
@@ -293,16 +368,20 @@ func (h *WebhookHandler) sendHotWallets(chatID int64) {
 			medal = medals[i]
 		}
 		sb.WriteString(fmt.Sprintf(
-			"%s `%s`\n   %d кластеров · $%s\n\n",
+			"%s <code>%s</code>\n   %d clusters · $%s\n\n",
 			medal,
-			escMD(maskAddr(w.WalletAddress)),
+			html.EscapeString(maskAddr(w.WalletAddress)),
 			w.ClusterCount,
 			fmtFloat(w.TotalVolumeUSD),
 		))
 	}
-	sb.WriteString("_Повторные покупки = наиболее убеждённые умные деньги_")
+	if lang == "ru" {
+		sb.WriteString("<i>Повторные покупки = наиболее убеждённые умные деньги</i>")
+	} else {
+		sb.WriteString("<i>Repeated buys = highest conviction smart money</i>")
+	}
 
-	h.client.SendMessageWithKeyboard(chatID, sb.String(), backToMenuKB())
+	h.client.SendMessageWithKeyboard(chatID, sb.String(), backToMenuKB(lang))
 }
 
 // ── Callback routing ───────────────────────────────────────────────────────────
@@ -317,191 +396,294 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 	userID := cb.From.ID
 	data := cb.Data
 
-	// Acknowledge quickly so Telegram removes the loading spinner.
 	_ = h.client.AnswerCallbackQuery(cb.ID, "")
+
+	// Fetch user to know their language preference
+	lang := cb.From.LanguageCode
+	if lang == "" {
+		lang = "en"
+	}
+	if strings.HasPrefix(strings.ToLower(lang), "ru") {
+		lang = "ru"
+	} else {
+		lang = "en"
+	}
+	user, _ := h.storage.GetOrCreateUser(userID, cb.From.Username, lang)
+	currentLang := user.Language
 
 	switch {
 	case data == "cb:menu":
-		user, _ := h.storage.GetOrCreateUser(userID, cb.From.Username, cb.From.LanguageCode)
 		h.editStartMenu(chatID, msgID, cb.From.FirstName, user)
 
 	case data == "cb:clusters":
-		h.editRecentClusters(chatID, msgID)
+		h.editRecentClusters(chatID, msgID, currentLang)
 
 	case data == "cb:stats":
-		h.editStats24h(chatID, msgID)
+		h.editStats24h(chatID, msgID, currentLang)
 
 	case data == "cb:watchlist":
-		h.editWatchlistMenu(chatID, msgID, userID)
+		h.editWatchlistMenu(chatID, msgID, userID, currentLang)
 
 	case data == "cb:hot":
-		h.editHotWallets(chatID, msgID)
+		h.editHotWallets(chatID, msgID, currentLang)
 
 	case data == "cb:settings":
-		user, _ := h.storage.GetOrCreateUser(userID, cb.From.Username, cb.From.LanguageCode)
 		h.editSettingsMenu(chatID, msgID, userID, user)
 
 	case data == "cb:vip":
-		h.editVIPInfo(chatID, msgID)
+		h.editVIPInfo(chatID, msgID, currentLang)
 
 	case data == "cb:help":
-		h.editHelp(chatID, msgID)
+		h.editHelp(chatID, msgID, currentLang)
+
+	case data == "cb:lang":
+		// Toggle language between en and ru
+		newLang := "ru"
+		if user.Language == "ru" {
+			newLang = "en"
+		}
+		_ = h.storage.SetUserLanguage(userID, newLang)
+		user.Language = newLang
+		h.editSettingsMenu(chatID, msgID, userID, user)
 
 	case strings.HasPrefix(data, "cb:vol:"):
-		h.handleVolumeChange(chatID, msgID, userID, cb.From.Username, cb.From.LanguageCode, data)
+		h.handleVolumeChange(chatID, msgID, userID, cb.From.Username, currentLang, data)
 
 	case strings.HasPrefix(data, "cb:net:"):
-		h.handleNetworkToggle(chatID, msgID, userID, cb.From.Username, cb.From.LanguageCode, data)
+		h.handleNetworkToggle(chatID, msgID, userID, cb.From.Username, currentLang, data)
 
 	case strings.HasPrefix(data, "cb:watchrm:"):
-		h.handleWatchlistRemove(chatID, msgID, userID, data)
+		h.handleWatchlistRemove(chatID, msgID, userID, data, currentLang)
 	}
 }
 
-// ── Edit-in-place helpers (keep the same message, swap content) ───────────────
+// ── Edit-in-place helpers ──────────────────────────────────────────────────────
 
 func (h *WebhookHandler) editStartMenu(chatID int64, msgID int, firstName string, user *storage.User) {
 	plan := "FREE"
 	if user.IsVIP {
 		plan = "👑 VIP"
 	}
-	body := fmt.Sprintf(
-		"👋 *Привет, %s\\!*\n\n"+
-			"📊 *Smart Cluster Terminal*\n\n"+
-			"👤 План: *%s*\n"+
-			"🔔 Мин\\. объём: *$%s*\n"+
-			"🌐 Сети: %s\n\nВыберите действие:",
-		escMD(firstName), escMD(plan),
-		fmtVolume(user.MinVolume), enabledNetworks(user),
-	)
+	lang := user.Language
+	var body string
+	if lang == "ru" {
+		body = fmt.Sprintf(
+			"👋 <b>Привет, %s!</b>\n\n"+
+				"📊 <b>Smart Cluster Terminal</b>\n\n"+
+				"👤 План: <b>%s</b>\n"+
+				"🔔 Мин. объём: <b>$%s</b>\n"+
+				"🌐 Сети: %s\n"+
+				"🌐 Язык: <b>Русский (RU)</b>\n\nВыберите действие:",
+			html.EscapeString(firstName), html.EscapeString(plan),
+			fmtVolume(user.MinVolume), enabledNetworks(user),
+		)
+	} else {
+		body = fmt.Sprintf(
+			"👋 <b>Hello, %s!</b>\n\n"+
+				"📊 <b>Smart Cluster Terminal</b>\n\n"+
+				"👤 Plan: <b>%s</b>\n"+
+				"🔔 Min Volume: <b>$%s</b>\n"+
+				"🌐 Networks: %s\n"+
+				"🌐 Language: <b>English (EN)</b>\n\nChoose an action:",
+			html.EscapeString(firstName), html.EscapeString(plan),
+			fmtVolume(user.MinVolume), enabledNetworks(user),
+		)
+	}
+
 	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: "📊 Открыть Terminal", WebApp: &WebAppInfo{URL: h.webAppURL()}}},
+			{{Text: tr(lang, "📊 Open Terminal", "📊 Открыть Terminal"), WebApp: &WebAppInfo{URL: h.webAppURL()}}},
 			{
-				{Text: "🔥 Свежие кластеры", CallbackData: "cb:clusters"},
-				{Text: "📈 Статистика 24h", CallbackData: "cb:stats"},
+				{Text: tr(lang, "🔥 Fresh Clusters", "🔥 Свежие кластеры"), CallbackData: "cb:clusters"},
+				{Text: "📈 24h Stats", CallbackData: "cb:stats"},
 			},
 			{
-				{Text: "⭐ Мой Watchlist", CallbackData: "cb:watchlist"},
-				{Text: "⚙️ Настройки", CallbackData: "cb:settings"},
+				{Text: tr(lang, "⭐ My Watchlist", "⭐ Мой Watchlist"), CallbackData: "cb:watchlist"},
+				{Text: tr(lang, "⚙️ Settings", "⚙️ Настройки"), CallbackData: "cb:settings"},
 			},
 			{
-				{Text: "🔥 Горячие кошельки", CallbackData: "cb:hot"},
-				{Text: "❓ Помощь", CallbackData: "cb:help"},
+				{Text: tr(lang, "🔥 Hot Wallets", "🔥 Горячие кошельки"), CallbackData: "cb:hot"},
+				{Text: tr(lang, "❓ Help", "❓ Помощь"), CallbackData: "cb:help"},
 			},
-			{{Text: "👑 VIP Пасс", CallbackData: "cb:vip"}},
+			{{Text: tr(lang, "👑 VIP Pass", "👑 VIP Пасс"), CallbackData: "cb:vip"}},
 		},
 	}
 	h.client.EditMessageText(chatID, msgID, body, kb)
 }
 
-func (h *WebhookHandler) editRecentClusters(chatID int64, msgID int) {
+func (h *WebhookHandler) editRecentClusters(chatID int64, msgID int, lang string) {
 	clusters, err := h.storage.GetRecentClusters(5)
 	if err != nil || len(clusters) == 0 {
-		h.client.EditMessageText(chatID, msgID,
-			"🔥 *Свежие кластеры*\n\nДанных пока нет\\.", backToMenuKB())
+		msg := "🔥 <b>Fresh Clusters</b>\n\nNo data available yet."
+		if lang == "ru" {
+			msg = "🔥 <b>Свежие кластеры</b>\n\nДанных пока нет."
+		}
+		h.client.EditMessageText(chatID, msgID, msg, backToMenuKB(lang))
 		return
 	}
 	var sb strings.Builder
-	sb.WriteString("🔥 *Последние кластеры*\n\n")
+	if lang == "ru" {
+		sb.WriteString("🔥 <b>Последние кластеры</b>\n\n")
+	} else {
+		sb.WriteString("🔥 <b>Recent Clusters</b>\n\n")
+	}
 	for _, c := range clusters {
 		sb.WriteString(fmt.Sprintf(
-			"• *%s* \\(%s\\)\n  💰 $%s · %d покупок\n\n",
-			escMD(c.TokenSymbol), escMD(c.Chain),
+			"• <b>%s</b> (%s)\n  💰 $%s · %d buys\n  <code>%s</code>\n\n",
+			html.EscapeString(c.TokenSymbol), html.EscapeString(c.Chain),
 			fmtFloat(c.TotalVolumeUSD), c.BuyCount,
+			c.TokenAddress,
 		))
 	}
-	h.client.EditMessageText(chatID, msgID, sb.String(), backToMenuKB())
+	h.client.EditMessageText(chatID, msgID, sb.String(), backToMenuKB(lang))
 }
 
-func (h *WebhookHandler) editStats24h(chatID int64, msgID int) {
+func (h *WebhookHandler) editStats24h(chatID int64, msgID int, lang string) {
 	stats, _ := h.storage.GetStats24h()
 	var body string
 	if stats != nil {
-		body = fmt.Sprintf(
-			"📈 *Статистика за 24 часа*\n\n"+
-				"🔢 Кластеров: *%d*\n"+
-				"💰 Объём: *$%s*\n"+
-				"🏆 Топ токен: *%s*\n"+
-				"🌐 Топ сеть: *%s*",
-			stats.TotalClusters, fmtFloat(stats.TotalVolumeUSD),
-			escMD(or(stats.TopToken, "—")),
-			escMD(or(stats.TopChain, "—")),
-		)
+		if lang == "ru" {
+			body = fmt.Sprintf(
+				"📈 <b>Статистика за 24 часа</b>\n\n"+
+					"🔢 Кластеров: <b>%d</b>\n"+
+					"💰 Объём: <b>$%s</b>\n"+
+					"🏆 Топ токен: <b>%s</b>\n"+
+					"🌐 Топ сеть: <b>%s</b>",
+				stats.TotalClusters, fmtFloat(stats.TotalVolumeUSD),
+				html.EscapeString(or(stats.TopToken, "—")),
+				html.EscapeString(or(stats.TopChain, "—")),
+			)
+		} else {
+			body = fmt.Sprintf(
+				"📈 <b>24h Statistics</b>\n\n"+
+					"🔢 Clusters: <b>%d</b>\n"+
+					"💰 Volume: <b>$%s</b>\n"+
+					"🏆 Top Token: <b>%s</b>\n"+
+					"🌐 Top Chain: <b>%s</b>",
+				stats.TotalClusters, fmtFloat(stats.TotalVolumeUSD),
+				html.EscapeString(or(stats.TopToken, "—")),
+				html.EscapeString(or(stats.TopChain, "—")),
+			)
+		}
 	} else {
-		body = "❌ Ошибка загрузки статистики\\."
+		body = "❌ Error loading statistics."
+		if lang == "ru" {
+			body = "❌ Ошибка загрузки статистики."
+		}
 	}
-	h.client.EditMessageText(chatID, msgID, body, backToMenuKB())
+	h.client.EditMessageText(chatID, msgID, body, backToMenuKB(lang))
 }
 
-func (h *WebhookHandler) editWatchlistMenu(chatID int64, msgID int, userID int64) {
+func (h *WebhookHandler) editWatchlistMenu(chatID int64, msgID int, userID int64, lang string) {
 	entries, _ := h.storage.GetWatchlist(userID)
 	if len(entries) == 0 {
-		h.client.EditMessageText(chatID, msgID,
-			"⭐ *Мой Watchlist*\n\nСписок пуст\\.\n\n"+
-				"Добавьте командой: `/watch <address> [заметка]`",
-			backToMenuKB(),
-		)
+		msg := "⭐ <b>My Watchlist</b>\n\nYour list is empty.\n\nAdd using: <code>/watch <address> [note]</code>"
+		if lang == "ru" {
+			msg = "⭐ <b>Мой Watchlist</b>\n\nСписок пуст.\n\nДобавьте командой: <code>/watch <address> [заметка]</code>"
+		}
+		h.client.EditMessageText(chatID, msgID, msg, backToMenuKB(lang))
 		return
 	}
 	var sb strings.Builder
-	sb.WriteString("⭐ *Мой Watchlist*\n\n")
+	if lang == "ru" {
+		sb.WriteString("⭐ <b>Мой Watchlist</b>\n\n")
+	} else {
+		sb.WriteString("⭐ <b>My Watchlist</b>\n\n")
+	}
 	var rows [][]InlineKeyboardButton
 	for _, e := range entries {
 		masked := maskAddr(e.WalletAddress)
-		sb.WriteString("• `")
-		sb.WriteString(escMD(masked))
-		sb.WriteString("`")
+		sb.WriteString("• <code>")
+		sb.WriteString(html.EscapeString(masked))
+		sb.WriteString("</code>")
 		if e.Note != "" {
 			sb.WriteString(" — ")
-			sb.WriteString(escMD(e.Note))
+			sb.WriteString(html.EscapeString(e.Note))
 		}
 		sb.WriteString("\n")
+
+		delText := "🗑 " + masked
 		rows = append(rows, []InlineKeyboardButton{
-			{Text: "🗑 " + masked, CallbackData: fmt.Sprintf("cb:watchrm:%d", e.ID)},
+			{Text: delText, CallbackData: fmt.Sprintf("cb:watchrm:%d", e.ID)},
 		})
 	}
-	rows = append(rows, []InlineKeyboardButton{{Text: "⬅️ Назад", CallbackData: "cb:menu"}})
+	backText := "⬅️ Back"
+	if lang == "ru" {
+		backText = "⬅️ Назад"
+	}
+	rows = append(rows, []InlineKeyboardButton{{Text: backText, CallbackData: "cb:menu"}})
 	h.client.EditMessageText(chatID, msgID, sb.String(), &InlineKeyboardMarkup{InlineKeyboard: rows})
 }
 
-func (h *WebhookHandler) editHotWallets(chatID int64, msgID int) {
+func (h *WebhookHandler) editHotWallets(chatID int64, msgID int, lang string) {
 	wallets, _ := h.storage.GetTopWallets(24, 5)
 	if len(wallets) == 0 {
-		h.client.EditMessageText(chatID, msgID, "🔥 *Горячие кошельки*\n\nДанных пока нет\\.", backToMenuKB())
+		msg := "🔥 <b>Hot Wallets</b>\n\nNo data available yet."
+		if lang == "ru" {
+			msg = "🔥 <b>Горячие кошельки</b>\n\nДанных пока нет."
+		}
+		h.client.EditMessageText(chatID, msgID, msg, backToMenuKB(lang))
 		return
 	}
 	var sb strings.Builder
-	sb.WriteString("🔥 *Горячие кошельки — 24h*\n\n")
+	if lang == "ru" {
+		sb.WriteString("🔥 <b>Горячие кошельки — 24h</b>\n\n")
+	} else {
+		sb.WriteString("🔥 <b>Hot Wallets — 24h</b>\n\n")
+	}
 	medals := []string{"🥇", "🥈", "🥉", "4️⃣", "5️⃣"}
 	for i, w := range wallets {
 		medal := "•"
 		if i < len(medals) {
 			medal = medals[i]
 		}
-		sb.WriteString(fmt.Sprintf("%s `%s` — %d кластеров · $%s\n",
-			medal, escMD(maskAddr(w.WalletAddress)),
+		sb.WriteString(fmt.Sprintf("%s <code>%s</code> — %d clusters · $%s\n",
+			medal, html.EscapeString(maskAddr(w.WalletAddress)),
 			w.ClusterCount, fmtFloat(w.TotalVolumeUSD),
 		))
 	}
-	h.client.EditMessageText(chatID, msgID, sb.String(), backToMenuKB())
+	h.client.EditMessageText(chatID, msgID, sb.String(), backToMenuKB(lang))
 }
 
 // ── Settings menu ──────────────────────────────────────────────────────────────
 
 func (h *WebhookHandler) editSettingsMenu(chatID int64, msgID int, userID int64, user *storage.User) {
-	body := fmt.Sprintf(
-		"⚙️ *Настройки алертов*\n\n"+
-			"Текущий мин\\. объём: *$%s*\n"+
-			"Активные сети: %s\n\n"+
-			"Изменения сохраняются мгновенно\\.",
-		fmtVolume(user.MinVolume), enabledNetworks(user),
-	)
+	lang := user.Language
+	var body string
+	if lang == "ru" {
+		body = fmt.Sprintf(
+			"⚙️ <b>Настройки алертов</b>\n\n"+
+				"Текущий мин. объём: <b>$%s</b>\n"+
+				"Активные сети: %s\n"+
+				"Язык: <b>Русский (RU)</b>\n\n"+
+				"Изменения сохраняются мгновенно.",
+			fmtVolume(user.MinVolume), enabledNetworks(user),
+		)
+	} else {
+		body = fmt.Sprintf(
+			"⚙️ <b>Alert Settings</b>\n\n"+
+				"Current Min Volume: <b>$%s</b>\n"+
+				"Active Networks: %s\n"+
+				"Language: <b>English (EN)</b>\n\n"+
+				"Changes are saved instantly.",
+			fmtVolume(user.MinVolume), enabledNetworks(user),
+		)
+	}
 
 	checkETH := emojiCheck(user.EthEnabled)
 	checkSOL := emojiCheck(user.SolEnabled)
 	checkBASE := emojiCheck(user.BaseEnabled)
 	checkBSC := emojiCheck(user.BscEnabled)
+
+	langToggleText := "🌐 Language: English (EN)"
+	if lang == "ru" {
+		langToggleText = "🌐 Язык / Language: Русский (RU)"
+	}
+
+	backText := "⬅️ Back"
+	if lang == "ru" {
+		backText = "⬅️ Назад"
+	}
 
 	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
@@ -519,14 +701,17 @@ func (h *WebhookHandler) editSettingsMenu(chatID int64, msgID int, userID int64,
 				{Text: checkBASE + " BASE", CallbackData: fmt.Sprintf("cb:net:%d:base", userID)},
 				{Text: checkBSC + " BSC", CallbackData: fmt.Sprintf("cb:net:%d:bsc", userID)},
 			},
-			{{Text: "⬅️ Назад", CallbackData: "cb:menu"}},
+			// Language Toggle Button
+			{
+				{Text: langToggleText, CallbackData: "cb:lang"},
+			},
+			{{Text: backText, CallbackData: "cb:menu"}},
 		},
 	}
 	h.client.EditMessageText(chatID, msgID, body, kb)
 }
 
 func (h *WebhookHandler) handleVolumeChange(chatID int64, msgID int, userID int64, username, lang, data string) {
-	// data = "cb:vol:<userID>:<volume>"
 	parts := strings.Split(data, ":")
 	if len(parts) < 4 {
 		return
@@ -549,7 +734,6 @@ func (h *WebhookHandler) handleVolumeChange(chatID int64, msgID int, userID int6
 }
 
 func (h *WebhookHandler) handleNetworkToggle(chatID int64, msgID int, userID int64, username, lang, data string) {
-	// data = "cb:net:<userID>:<eth|sol|base|bsc>"
 	parts := strings.Split(data, ":")
 	if len(parts) < 4 {
 		return
@@ -581,8 +765,7 @@ func (h *WebhookHandler) handleNetworkToggle(chatID int64, msgID int, userID int
 	h.editSettingsMenu(chatID, msgID, userID, user)
 }
 
-func (h *WebhookHandler) handleWatchlistRemove(chatID int64, msgID int, userID int64, data string) {
-	// data = "cb:watchrm:<entryID>"
+func (h *WebhookHandler) handleWatchlistRemove(chatID int64, msgID int, userID int64, data, lang string) {
 	parts := strings.Split(data, ":")
 	if len(parts) < 3 {
 		return
@@ -592,26 +775,48 @@ func (h *WebhookHandler) handleWatchlistRemove(chatID int64, msgID int, userID i
 		return
 	}
 	_ = h.storage.RemoveWatchlistWallet(userID, entryID)
-	h.editWatchlistMenu(chatID, msgID, userID)
+	h.editWatchlistMenu(chatID, msgID, userID, lang)
 }
 
 // ── VIP info ───────────────────────────────────────────────────────────────────
 
-func (h *WebhookHandler) editVIPInfo(chatID int64, msgID int) {
-	body := "👑 *VIP Пасс — Smart Cluster Terminal*\n\n" +
-		"*Что входит:*\n" +
-		"🔓 100% адресов всех кошельков без маскировки\n" +
-		"⚡ Мгновенные Telegram алерты\n" +
-		"🎯 Кастомные фильтры по токену и объёму\n" +
-		"📈 Полный архив кластеров + экспорт CSV\n" +
-		"🔥 Персональный список горячих кошельков\n\n" +
-		"💳 *Оплата:* Telegram Stars или крипто\n\n" +
-		"Свяжитесь с @support для активации\\."
+func (h *WebhookHandler) editVIPInfo(chatID int64, msgID int, lang string) {
+	var body string
+	if lang == "ru" {
+		body = "👑 <b>VIP Пасс — Smart Cluster Terminal</b>\n\n" +
+			"<b>Что входит:</b>\n" +
+			"🔓 100% адресов всех кошельков без маскировки\n" +
+			"⚡ Мгновенные Telegram алерты\n" +
+			"🎯 Кастомные фильтры по токену и объёму\n" +
+			"📈 Полный архив кластеров + экспорт CSV\n" +
+			"🔥 Персональный список горячих кошельков\n\n" +
+			"💳 <b>Оплата:</b> Telegram Stars или крипто\n\n" +
+			"Свяжитесь с @support для активации."
+	} else {
+		body = "👑 <b>VIP Pass — Smart Cluster Terminal</b>\n\n" +
+			"<b>What's included:</b>\n" +
+			"🔓 100% unmasked wallet addresses\n" +
+			"⚡ Instant Telegram alerts\n" +
+			"🎯 Custom token & volume filters\n" +
+			"📈 Full cluster history + CSV export\n" +
+			"🔥 Personalized hot wallet rankings\n\n" +
+			"💳 <b>Payment:</b> Telegram Stars or Crypto\n\n" +
+			"Contact @support for activation."
+	}
+
+	btnText := "🔑 Buy VIP"
+	if lang == "ru" {
+		btnText = "🔑 Купить VIP"
+	}
+	backText := "⬅️ Back"
+	if lang == "ru" {
+		backText = "⬅️ Назад"
+	}
 
 	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: "🔑 Купить VIP", URL: "https://t.me/support"}},
-			{{Text: "⬅️ Назад", CallbackData: "cb:menu"}},
+			{{Text: btnText, URL: "https://t.me/support"}},
+			{{Text: backText, CallbackData: "cb:menu"}},
 		},
 	}
 	h.client.EditMessageText(chatID, msgID, body, kb)
@@ -619,18 +824,31 @@ func (h *WebhookHandler) editVIPInfo(chatID int64, msgID int) {
 
 // ── Help ───────────────────────────────────────────────────────────────────────
 
-func (h *WebhookHandler) editHelp(chatID int64, msgID int) {
-	body := "❓ *Помощь — команды бота*\n\n" +
-		"`/start` — главное меню\n" +
-		"`/watch <addr> [заметка]` — добавить кошелёк в watchlist\n" +
-		"`/watchlist` — показать watchlist\n" +
-		"`/stats` — статистика за 24 часа\n" +
-		"`/hot` — топ горячих кошельков\n\n" +
-		"*Как работают кластеры:*\n" +
-		"Система отслеживает покупки на DEX и сигнализирует, " +
-		"когда ≥3 умных кошелька аккумулируют один токен в течение 5 минут\\."
+func (h *WebhookHandler) editHelp(chatID int64, msgID int, lang string) {
+	var body string
+	if lang == "ru" {
+		body = "❓ <b>Помощь — команды бота</b>\n\n" +
+			"<code>/start</code> — главное меню\n" +
+			"<code>/watch <addr> [заметка]</code> — добавить кошелёк в watchlist\n" +
+			"<code>/watchlist</code> — показать watchlist\n" +
+			"<code>/stats</code> — статистика за 24 часа\n" +
+			"<code>/hot</code> — топ горячих кошельков\n\n" +
+			"<b>Как работают кластеры:</b>\n" +
+			"Система отслеживает покупки на DEX и сигнализирует, " +
+			"когда ≥3 умных кошелька аккумулируют один токен в течение 5 минут."
+	} else {
+		body = "❓ <b>Help — Bot Commands</b>\n\n" +
+			"<code>/start</code> — main menu\n" +
+			"<code>/watch <addr> [note]</code> — add wallet to watchlist\n" +
+			"<code>/watchlist</code> — view watchlist\n" +
+			"<code>/stats</code> — 24h statistics\n" +
+			"<code>/hot</code> — top hot wallets\n\n" +
+			"<b>How clusters work:</b>\n" +
+			"The system tracks DEX swaps and signals when ≥3 smart wallets " +
+			"accumulate the same token within 5 minutes."
+	}
 
-	h.client.EditMessageText(chatID, msgID, body, backToMenuKB())
+	h.client.EditMessageText(chatID, msgID, body, backToMenuKB(lang))
 }
 
 // ── URL helpers ────────────────────────────────────────────────────────────────
@@ -644,12 +862,23 @@ func (h *WebhookHandler) webAppURL() string {
 
 // ── Shared UI helpers ──────────────────────────────────────────────────────────
 
-func backToMenuKB() *InlineKeyboardMarkup {
+func backToMenuKB(lang string) *InlineKeyboardMarkup {
+	text := "⬅️ Main Menu"
+	if lang == "ru" {
+		text = "⬅️ Главное меню"
+	}
 	return &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: "⬅️ Главное меню", CallbackData: "cb:menu"}},
+			{{Text: text, CallbackData: "cb:menu"}},
 		},
 	}
+}
+
+func tr(lang, en, ru string) string {
+	if lang == "ru" {
+		return ru
+	}
+	return en
 }
 
 func enabledNetworks(u *storage.User) string {
@@ -667,7 +896,7 @@ func enabledNetworks(u *storage.User) string {
 		nets = append(nets, "BSC")
 	}
 	if len(nets) == 0 {
-		return "_none_"
+		return "<i>none</i>"
 	}
 	return strings.Join(nets, " · ")
 }
@@ -699,19 +928,6 @@ func fmtFloat(v float64) string {
 	default:
 		return fmt.Sprintf("%.2f", v)
 	}
-}
-
-// escMD escapes special characters for MarkdownV2.
-func escMD(s string) string {
-	var sb strings.Builder
-	for _, r := range s {
-		switch r {
-		case '_', '*', '[', ']', '(', ')', '~', '`', '>', '#', '+', '-', '=', '|', '{', '}', '.', '!', '\\':
-			sb.WriteRune('\\')
-		}
-		sb.WriteRune(r)
-	}
-	return sb.String()
 }
 
 func or(s, fallback string) string {

@@ -55,7 +55,7 @@ func (c *Client) SendMessageWithKeyboard(chatID int64, text string, kb *InlineKe
 	return c.post("sendMessage", SendMessageRequest{
 		ChatID:      chatID,
 		Text:        text,
-		ParseMode:   "Markdown",
+		ParseMode:   "HTML",
 		ReplyMarkup: kb,
 	})
 }
@@ -66,7 +66,7 @@ func (c *Client) EditMessageText(chatID int64, messageID int, text string, kb *I
 		ChatID:      chatID,
 		MessageID:   messageID,
 		Text:        text,
-		ParseMode:   "Markdown",
+		ParseMode:   "HTML",
 		ReplyMarkup: kb,
 	})
 }

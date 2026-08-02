@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"html"
 	"log"
 	"strings"
 	"time"
@@ -27,17 +28,20 @@ func explorerURL(chain, addr string) string {
 	}
 }
 
-// dexScreenerURL builds the DEXScreener search URL for a token symbol.
-func dexScreenerURL(symbol string) string {
-	return "https://dexscreener.com/search?q=" + symbol
+// dexScreenerURL builds the DEXScreener chart URL for a token address.
+func dexScreenerURL(chain, addr string) string {
+	return fmt.Sprintf("https://dexscreener.com/%s/%s", strings.ToLower(chain), addr)
 }
 
-// trojanURL builds a Trojan Bot deep-link for quick buying.
-func trojanURL(tokenAddr string) string {
-	return "https://t.me/heymaestro_bot?start=buy_" + tokenAddr
+// birdeyeURL builds the Birdeye / GMGN alternative chart URL.
+func birdeyeURL(chain, addr string) string {
+	if strings.EqualFold(chain, "solana") || strings.EqualFold(chain, "sol") {
+		return "https://birdeye.so/token/" + addr + "?chain=solana"
+	}
+	return "https://gmgn.ai/" + strings.ToLower(chain) + "/token/" + addr
 }
 
-// contractCheckURL returns a Rugcheck / DeFi-guard URL.
+// contractCheckURL returns a Rugcheck / Safety check URL.
 func contractCheckURL(chain, addr string) string {
 	switch strings.ToLower(chain) {
 	case "solana", "sol":
@@ -61,45 +65,55 @@ func chainNetworkMatch(chain string, u storage.User) bool {
 	case strings.Contains(c, "bsc") || c == "bnb":
 		return u.BscEnabled
 	default:
-		return true // unknown chain — let it through rather than silently drop
+		return true
 	}
 }
 
-// formatAlertMessage builds the rich Markdown alert body sent to users.
+// formatAlertMessage builds the rich HTML alert body sent to users.
 func formatAlertMessage(alert detector.ClusterAlert) string {
 	chainEmoji := chainEmoji(alert.Chain)
 	volStr := fmtFloat(alert.TotalVolumeUSD)
 	windowMin := alert.TimeWindowSeconds / 60
+	if windowMin < 1 {
+		windowMin = 1
+	}
+
+	avgEntry := alert.TotalVolumeUSD / float64(alert.BuyCount)
+	if alert.BuyCount == 0 {
+		avgEntry = alert.TotalVolumeUSD
+	}
 
 	return fmt.Sprintf(
-		"🚨 *КЛАСТЕР ОБНАРУЖЕН\\!*\n\n"+
-			"%s *%s* \\| %s\n\n"+
-			"💰 Объём: *$%s*\n"+
-			"👛 Кошельков: *%d*\n"+
-			"⏱ Окно: *%d мин*\n"+
-			"📍 Ведущий кошелёк: `%s`\n\n"+
-			"🔗 Контракт: `%s`",
+		"<b>🚨 CLUSTER & INTELLIGENCE ALERT!</b>\n\n"+
+			"%s <b>%s</b> | <code>%s</code>\n\n"+
+			"💰 Total Cluster Volume: <b>$%s</b>\n"+
+			"👛 Smart Wallets Involved: <b>%d</b>\n"+
+			"📊 Average Entry Price: <b>$%s</b>\n"+
+			"⏱ Time Window: <b>%d min</b>\n"+
+			"📍 Lead Wallet: <code>%s</code>\n\n"+
+			"🔗 Contract Address:\n<code>%s</code>",
 		chainEmoji,
-		escMD(alert.TokenSymbol),
-		escMD(alert.Chain),
-		escMD(volStr),
+		html.EscapeString(alert.TokenSymbol),
+		html.EscapeString(alert.Chain),
+		html.EscapeString(volStr),
 		alert.BuyCount,
+		html.EscapeString(fmtFloat(avgEntry)),
 		windowMin,
-		escMD(maskAddr(alert.LeadWallet)),
-		escMD(maskAddr(alert.TokenAddress)),
+		html.EscapeString(maskAddr(alert.LeadWallet)),
+		alert.TokenAddress,
 	)
 }
 
-// alertKeyboard builds the interactive inline keyboard attached to every alert.
+// alertKeyboard builds the interactive inline keyboard attached to every alert with analytical links.
 func alertKeyboard(alert detector.ClusterAlert) *InlineKeyboardMarkup {
 	return &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
-				{Text: "📈 DEXScreener", URL: dexScreenerURL(alert.TokenSymbol)},
-				{Text: "⚡ Quick Buy", URL: trojanURL(alert.TokenAddress)},
+				{Text: "📈 DexScreener", URL: dexScreenerURL(alert.Chain, alert.TokenAddress)},
+				{Text: "📊 Birdeye / GMGN", URL: birdeyeURL(alert.Chain, alert.TokenAddress)},
 			},
 			{
-				{Text: "🛡 Contract Check", URL: contractCheckURL(alert.Chain, alert.TokenAddress)},
+				{Text: "🛡 RugCheck / Safety", URL: contractCheckURL(alert.Chain, alert.TokenAddress)},
 				{Text: "🔍 Explorer", URL: explorerURL(alert.Chain, alert.TokenAddress)},
 			},
 			{
@@ -125,18 +139,8 @@ func chainEmoji(chain string) string {
 	}
 }
 
-// ── StartAlertBroadcaster ──────────────────────────────────────────────────────
-
 // StartAlertBroadcaster runs as a goroutine that consumes alerts from
 // alertsChan and fans them out to every qualifying user in the database.
-//
-// Per-user filtering rules:
-//   - alert.TotalVolumeUSD must be >= user.MinVolume
-//   - alert.Chain must match one of the user's enabled networks
-//
-// Additionally, if the alert's LeadWallet appears in any user's watchlist,
-// that user receives a personalised "🎯 Watchlist Hit" ping regardless of
-// their volume/network filters.
 func StartAlertBroadcaster(
 	ctx context.Context,
 	client *Client,
@@ -159,7 +163,6 @@ func StartAlertBroadcaster(
 }
 
 func broadcastAlert(client *Client, store *storage.Storage, alert detector.ClusterAlert) {
-	// Persist the cluster to the database first.
 	if err := store.SaveCluster(
 		alert.TokenAddress, alert.TokenSymbol, alert.Chain,
 		alert.BuyCount, alert.TotalVolumeUSD, alert.TimeWindowSeconds,
@@ -177,7 +180,6 @@ func broadcastAlert(client *Client, store *storage.Storage, alert detector.Clust
 	msg := formatAlertMessage(alert)
 	kb := alertKeyboard(alert)
 
-	// Set of users already notified (avoid double-ping from watchlist logic).
 	notified := make(map[int64]struct{}, len(users))
 
 	for _, u := range users {
@@ -192,13 +194,9 @@ func broadcastAlert(client *Client, store *storage.Storage, alert detector.Clust
 		}
 		notified[u.UserID] = struct{}{}
 
-		// Throttle: 20 ms between sends to avoid hitting Telegram's 30 msg/s limit.
 		time.Sleep(20 * time.Millisecond)
 	}
 
-	// Watchlist personalised pings ──────────────────────────────────────────
-	// If the lead wallet is in someone's watchlist, ping them even if they
-	// didn't qualify by volume/network filters above.
 	if alert.LeadWallet == "" {
 		return
 	}
@@ -209,16 +207,18 @@ func broadcastAlert(client *Client, store *storage.Storage, alert detector.Clust
 	}
 	for _, uid := range watchUsers {
 		if _, already := notified[uid]; already {
-			continue // they already got the standard alert
+			continue
 		}
 		watchMsg := fmt.Sprintf(
-			"🎯 *Watchlist Hit\\!*\n\n"+
-				"Отслеживаемый кошелёк `%s` только что купил *%s* на *%s*\\!\n\n"+
-				"💰 Объём сделки: *$%s*",
-			escMD(maskAddr(alert.LeadWallet)),
-			escMD(alert.TokenSymbol),
-			escMD(alert.Chain),
-			escMD(fmtFloat(alert.TotalVolumeUSD)),
+			"<b>🎯 Watchlist Hit!</b>\n\n"+
+				"Monitored wallet <code>%s</code> just bought <b>%s</b> on <b>%s</b>!\n\n"+
+				"💰 Deal Volume: <b>$%s</b>\n"+
+				"🔗 Contract:\n<code>%s</code>",
+			html.EscapeString(maskAddr(alert.LeadWallet)),
+			html.EscapeString(alert.TokenSymbol),
+			html.EscapeString(alert.Chain),
+			html.EscapeString(fmtFloat(alert.TotalVolumeUSD)),
+			alert.TokenAddress,
 		)
 		if err := client.SendMessageWithKeyboard(uid, watchMsg, kb); err != nil {
 			log.Printf("[BROADCASTER] watchlist ping %d: %v", uid, err)
@@ -227,12 +227,7 @@ func broadcastAlert(client *Client, store *storage.Storage, alert detector.Clust
 	}
 }
 
-// ── StartDailyDigest (Bonus Feature #2) ───────────────────────────────────────
-
-// StartDailyDigest schedules a daily summary message sent to every user at
-// 09:00 UTC. The digest includes the top 3 clusters from the previous 24 h,
-// total volume, and the hottest wallet addresses — providing passive value
-// even to users who missed real-time alerts.
+// StartDailyDigest schedules a daily summary message sent to every user at 09:00 UTC.
 func StartDailyDigest(ctx context.Context, client *Client, store *storage.Storage) {
 	go func() {
 		for {
@@ -249,7 +244,6 @@ func StartDailyDigest(ctx context.Context, client *Client, store *storage.Storag
 	}()
 }
 
-// nextDailyDigestTime returns the next 09:00 UTC moment.
 func nextDailyDigestTime() time.Time {
 	now := time.Now().UTC()
 	next := time.Date(now.Year(), now.Month(), now.Day(), 9, 0, 0, 0, time.UTC)
@@ -280,66 +274,62 @@ func sendDailyDigest(client *Client, store *storage.Storage) {
 		return
 	}
 
-	// ── Build digest message ─────────────────────────────────────────────────
 	var sb strings.Builder
-	sb.WriteString("📰 *Ежедневный дайджест — Smart Cluster Terminal*\n")
+	sb.WriteString("<b>📰 Daily Digest — Smart Cluster Terminal</b>\n")
 	sb.WriteString(fmt.Sprintf("🗓 %s UTC\n\n", time.Now().UTC().Format("02 Jan 2006")))
 
-	// Stats
-	sb.WriteString("📊 *Сводка за 24 часа:*\n")
+	sb.WriteString("📊 <b>24h Summary:</b>\n")
 	if stats != nil {
 		sb.WriteString(fmt.Sprintf(
-			"• Кластеров: *%d*\n• Объём: *$%s*\n• Топ токен: *%s*\n• Топ сеть: *%s*\n\n",
+			"• Clusters: <b>%d</b>\n• Volume: <b>$%s</b>\n• Top Token: <b>%s</b>\n• Top Chain: <b>%s</b>\n\n",
 			stats.TotalClusters,
-			escMD(fmtFloat(stats.TotalVolumeUSD)),
-			escMD(or(stats.TopToken, "—")),
-			escMD(or(stats.TopChain, "—")),
+			html.EscapeString(fmtFloat(stats.TotalVolumeUSD)),
+			html.EscapeString(or(stats.TopToken, "—")),
+			html.EscapeString(or(stats.TopChain, "—")),
 		))
 	} else {
-		sb.WriteString("_Нет данных_\n\n")
+		sb.WriteString("<i>No data</i>\n\n")
 	}
 
-	// Top clusters
 	if len(clusters) > 0 {
-		sb.WriteString("🔥 *Топ кластеры:*\n")
+		sb.WriteString("🔥 <b>Top Clusters:</b>\n")
 		for i, c := range clusters {
 			sb.WriteString(fmt.Sprintf(
-				"%d\\. *%s* \\(%s\\) — $%s · %d кошельков\n",
+				"%d. <b>%s</b> (%s) — $%s · %d wallets\n<code>%s</code>\n",
 				i+1,
-				escMD(c.TokenSymbol),
-				escMD(c.Chain),
-				escMD(fmtFloat(c.TotalVolumeUSD)),
+				html.EscapeString(c.TokenSymbol),
+				html.EscapeString(c.Chain),
+				html.EscapeString(fmtFloat(c.TotalVolumeUSD)),
 				c.BuyCount,
+				c.TokenAddress,
 			))
 		}
 		sb.WriteString("\n")
 	}
 
-	// Hot wallets
 	if len(hotWallets) > 0 {
-		sb.WriteString("🔥 *Горячие кошельки:*\n")
+		sb.WriteString("🔥 <b>Hot Wallets:</b>\n")
 		for _, w := range hotWallets {
 			sb.WriteString(fmt.Sprintf(
-				"• `%s` — %d кластеров · $%s\n",
-				escMD(maskAddr(w.WalletAddress)),
+				"• <code>%s</code> — %d clusters · $%s\n",
+				html.EscapeString(maskAddr(w.WalletAddress)),
 				w.ClusterCount,
-				escMD(fmtFloat(w.TotalVolumeUSD)),
+				html.EscapeString(fmtFloat(w.TotalVolumeUSD)),
 			))
 		}
 		sb.WriteString("\n")
 	}
 
-	sb.WriteString("_Откройте терминал для полной картины\\._")
+	sb.WriteString("<i>Open the terminal for complete intelligence.</i>")
 	digestMsg := sb.String()
 
 	digestKB := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: "📊 Открыть Terminal", CallbackData: "cb:clusters"}},
-			{{Text: "📈 Полная статистика", CallbackData: "cb:stats"}},
+			{{Text: "📊 Open Terminal", CallbackData: "cb:clusters"}},
+			{{Text: "📈 Full Stats", CallbackData: "cb:stats"}},
 		},
 	}
 
-	// Fan out to all users.
 	users, err := store.GetAllUsers()
 	if err != nil {
 		log.Printf("[DIGEST] GetAllUsers: %v", err)
@@ -349,7 +339,7 @@ func sendDailyDigest(client *Client, store *storage.Storage) {
 		if err := client.SendMessageWithKeyboard(u.UserID, digestMsg, digestKB); err != nil {
 			log.Printf("[DIGEST] send to %d: %v", u.UserID, err)
 		}
-		time.Sleep(30 * time.Millisecond) // stay well under Telegram's rate limit
+		time.Sleep(30 * time.Millisecond)
 	}
 	log.Printf("[DIGEST] Done — sent to %d users", len(users))
 }
