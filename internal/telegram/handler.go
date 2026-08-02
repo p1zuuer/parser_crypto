@@ -25,22 +25,30 @@ func NewWebhookHandler(client *Client, store *storage.Storage) *WebhookHandler {
 
 // ServeHTTP implements the http.Handler interface.
 func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	log.Printf("[WEBHOOK] Received %s request on path: %s", r.Method, r.URL.Path)
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	// Always respond with 200 OK immediately as per Webhook best practices
-	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("OK"))
-
 	var update Update
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
-		log.Printf("ERROR: failed to decode telegram update: %v", err)
+		log.Printf("[WEBHOOK] ERROR: failed to decode telegram update: %v", err)
+		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
 
-	// Process update asynchronously or synchronously without holding up response
+	if update.Message != nil && update.Message.From != nil {
+		log.Printf("[WEBHOOK] Processing update from user %d: %s", update.Message.From.ID, update.Message.Text)
+	}
+
+	// Always respond with 200 OK as per Webhook best practices
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("OK"))
+	log.Printf("[WEBHOOK] Successful response status code: %d", http.StatusOK)
+
+	// Process update asynchronously
 	go h.handleUpdate(&update)
 }
 
@@ -64,10 +72,10 @@ func (h *WebhookHandler) handleUpdate(update *Update) {
 		if h.storage != nil {
 			_, err := h.storage.GetOrCreateUser(user.ID, user.Username, langCode)
 			if err != nil {
-				log.Printf("ERROR: failed to get or create user %d in DB: %v", user.ID, err)
+				log.Printf("[WEBHOOK] Database error getting or creating user %d: %v", user.ID, err)
 			} else {
 				if err := h.storage.SetUserLanguage(user.ID, langCode); err != nil {
-					log.Printf("ERROR: failed to set user language for %d: %v", user.ID, err)
+					log.Printf("[WEBHOOK] Database error setting user language for %d: %v", user.ID, err)
 				}
 			}
 		}
@@ -77,7 +85,7 @@ func (h *WebhookHandler) handleUpdate(update *Update) {
 		responseText := welcome + "\n\n" + chooseLang
 
 		if err := h.client.SendMessage(chatID, responseText); err != nil {
-			log.Printf("ERROR: failed to send message to chat %d: %v", chatID, err)
+			log.Printf("[WEBHOOK] Error sending message to Telegram API for chat %d: %v", chatID, err)
 		}
 		return
 	}
@@ -86,13 +94,15 @@ func (h *WebhookHandler) handleUpdate(update *Update) {
 	currentLang := langCode
 	if h.storage != nil {
 		dbUser, err := h.storage.GetOrCreateUser(user.ID, user.Username, langCode)
-		if err == nil && dbUser != nil && dbUser.Language != "" {
+		if err != nil {
+			log.Printf("[WEBHOOK] Database error looking up user %d: %v", user.ID, err)
+		} else if dbUser != nil && dbUser.Language != "" {
 			currentLang = dbUser.Language
 		}
 	}
 
 	responseText := i18n.T(currentLang, "welcome_message")
 	if err := h.client.SendMessage(chatID, responseText); err != nil {
-		log.Printf("ERROR: failed to send message to chat %d: %v", chatID, err)
+		log.Printf("[WEBHOOK] Error sending message to Telegram API for chat %d: %v", chatID, err)
 	}
 }

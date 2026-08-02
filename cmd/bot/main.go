@@ -47,6 +47,7 @@ func main() {
 
 	// 9. Register HTTP routes
 	mux := http.NewServeMux()
+	mux.Handle("/", webhookHandler)
 	mux.Handle("/webhook", webhookHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

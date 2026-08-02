@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -17,12 +19,14 @@ type Client struct {
 
 // NewClient creates a new Telegram HTTP client.
 func NewClient(token string) *Client {
+	cleanToken := strings.TrimSpace(token)
+	cleanToken = strings.Trim(cleanToken, `"'`)
 	return &Client{
-		token: token,
+		token: cleanToken,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
-		apiBaseURL: "https://api.telegram.org/bot" + token,
+		apiBaseURL: fmt.Sprintf("https://api.telegram.org/bot%s", cleanToken),
 	}
 }
 
@@ -45,7 +49,10 @@ func (c *Client) SendMessageWithKeyboard(chatID int64, text string, replyMarkup 
 		return fmt.Errorf("failed to marshal send message request: %w", err)
 	}
 
-	url := c.apiBaseURL + "/sendMessage"
+	method := "sendMessage"
+	log.Printf("[TELEGRAM API] Sending request to method: %s", method)
+
+	url := c.apiBaseURL + "/" + method
 	resp, err := c.httpClient.Post(url, "application/json", bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		return fmt.Errorf("failed to send http request to telegram: %w", err)
