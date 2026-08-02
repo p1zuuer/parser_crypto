@@ -87,6 +87,18 @@ CREATE TABLE IF NOT EXISTS alert_counts (
 	PRIMARY KEY(user_id, date_str)
 );
 
+CREATE TABLE IF NOT EXISTS clusters (
+	id                  INTEGER  PRIMARY KEY AUTOINCREMENT,
+	token_address       TEXT     NOT NULL,
+	token_symbol        TEXT     NOT NULL,
+	chain               TEXT     NOT NULL,
+	buy_count           INTEGER  NOT NULL,
+	total_volume_usd    REAL     NOT NULL,
+	time_window_seconds INTEGER  NOT NULL,
+	wallet_address      TEXT     NOT NULL DEFAULT '',
+	created_at          DATETIME NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_watchlists_user   ON user_watchlists(user_id);
 CREATE INDEX IF NOT EXISTS idx_watchlists_wallet ON user_watchlists(wallet_address);
 CREATE INDEX IF NOT EXISTS idx_clusters_chain    ON clusters(chain);
