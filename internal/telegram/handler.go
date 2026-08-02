@@ -119,7 +119,8 @@ func (h *WebhookHandler) sendStartMenu(chatID int64, firstName string, user *sto
 	var body string
 	if lang == "ru" {
 		body = fmt.Sprintf(
-			"👋 <b>Привет, %s!</b>\n\n"+
+			"👋 <b>Привет, %s!</b>\n"+
+				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n"+
 				"📊 <b>Smart Cluster Terminal</b>\n"+
 				"Аналитика и безопасность смарт-денег в реальном времени.\n\n"+
 				"👤 План: <b>%s</b>\n"+
@@ -134,7 +135,8 @@ func (h *WebhookHandler) sendStartMenu(chatID int64, firstName string, user *sto
 		)
 	} else {
 		body = fmt.Sprintf(
-			"👋 <b>Hello, %s!</b>\n\n"+
+			"👋 <b>Hello, %s!</b>\n"+
+				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n"+
 				"📊 <b>Smart Cluster Terminal</b>\n"+
 				"Real-time Smart Money Analytics & Security.\n\n"+
 				"👤 Plan: <b>%s</b>\n"+
@@ -240,9 +242,9 @@ func (h *WebhookHandler) sendWatchlistMenu(chatID, userID int64, lang string) {
 	}
 
 	if len(entries) == 0 {
-		msg := "⭐ <b>My Watchlist</b>\n\nYour list is empty.\n\nAdd a wallet using:\n<code>/watch <address> [note]</code>"
+		msg := "⭐ <b>My Watchlist</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\nYour list is empty.\n\nAdd a wallet using:\n<code>/watch <address> [note]</code>"
 		if lang == "ru" {
-			msg = "⭐ <b>Мой Watchlist</b>\n\nСписок пуст.\n\nДобавьте кошелёк командой:\n<code>/watch <address> [заметка]</code>"
+			msg = "⭐ <b>Мой Watchlist</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\nСписок пуст.\n\nДобавьте кошелёк командой:\n<code>/watch <address> [заметка]</code>"
 		}
 		h.client.SendMessageWithKeyboard(chatID, msg, backToMenuKB(lang))
 		return
@@ -250,9 +252,9 @@ func (h *WebhookHandler) sendWatchlistMenu(chatID, userID int64, lang string) {
 
 	var sb strings.Builder
 	if lang == "ru" {
-		sb.WriteString("⭐ <b>Мой Watchlist</b>\n\n")
+		sb.WriteString("⭐ <b>Мой Watchlist</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n")
 	} else {
-		sb.WriteString("⭐ <b>My Watchlist</b>\n\n")
+		sb.WriteString("⭐ <b>My Watchlist</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n")
 	}
 
 	var rows [][]InlineKeyboardButton
@@ -307,7 +309,8 @@ func (h *WebhookHandler) sendStats24h(chatID int64, lang string) {
 	var body string
 	if lang == "ru" {
 		body = fmt.Sprintf(
-			"📈 <b>Статистика за 24 часа</b>\n\n"+
+			"📈 <b>Статистика за 24 часа</b>\n"+
+				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
 				"🔢 Кластеров обнаружено: <b>%d</b>\n"+
 				"💰 Общий объём: <b>$%s</b>\n"+
 				"🏆 Топ токен: <b>%s</b>\n"+
@@ -319,7 +322,8 @@ func (h *WebhookHandler) sendStats24h(chatID int64, lang string) {
 		)
 	} else {
 		body = fmt.Sprintf(
-			"📈 <b>24h Statistics</b>\n\n"+
+			"📈 <b>24h Statistics</b>\n"+
+				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
 				"🔢 Clusters Detected: <b>%d</b>\n"+
 				"💰 Total Volume: <b>$%s</b>\n"+
 				"🏆 Top Token: <b>%s</b>\n"+
@@ -354,11 +358,9 @@ func (h *WebhookHandler) sendHotWallets(chatID int64, lang string) {
 
 	var sb strings.Builder
 	if lang == "ru" {
-		sb.WriteString("🔥 <b>Горячие кошельки — 24h</b>\n")
-		sb.WriteString("<i>Кошельки, появляющиеся в наибольшем числе кластеров</i>\n\n")
+		sb.WriteString("🔥 <b>Горячие кошельки — 24h</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n<i>Кошельки, появляющиеся в наибольшем числе кластеров</i>\n\n")
 	} else {
-		sb.WriteString("🔥 <b>Hot Wallets — 24h</b>\n")
-		sb.WriteString("<i>Wallets appearing in the most clusters</i>\n\n")
+		sb.WriteString("🔥 <b>Hot Wallets — 24h</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n<i>Wallets appearing in the most clusters</i>\n\n")
 	}
 
 	medals := []string{"🥇", "🥈", "🥉", "4️⃣", "5️⃣"}
@@ -652,7 +654,8 @@ func (h *WebhookHandler) editSettingsMenu(chatID int64, msgID int, userID int64,
 	var body string
 	if lang == "ru" {
 		body = fmt.Sprintf(
-			"⚙️ <b>Настройки алертов</b>\n\n"+
+			"⚙️ <b>Настройки алертов</b>\n"+
+				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
 				"Текущий мин. объём: <b>$%s</b>\n"+
 				"Активные сети: %s\n"+
 				"Язык: <b>Русский (RU)</b>\n\n"+
@@ -661,7 +664,8 @@ func (h *WebhookHandler) editSettingsMenu(chatID int64, msgID int, userID int64,
 		)
 	} else {
 		body = fmt.Sprintf(
-			"⚙️ <b>Alert Settings</b>\n\n"+
+			"⚙️ <b>Alert Settings</b>\n"+
+				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
 				"Current Min Volume: <b>$%s</b>\n"+
 				"Active Networks: %s\n"+
 				"Language: <b>English (EN)</b>\n\n"+
@@ -783,7 +787,7 @@ func (h *WebhookHandler) handleWatchlistRemove(chatID int64, msgID int, userID i
 func (h *WebhookHandler) editVIPInfo(chatID int64, msgID int, lang string) {
 	var body string
 	if lang == "ru" {
-		body = "👑 <b>VIP Пасс — Smart Cluster Terminal</b>\n\n" +
+		body = "👑 <b>VIP Пасс — Smart Cluster Terminal</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
 			"<b>Что входит:</b>\n" +
 			"🔓 100% адресов всех кошельков без маскировки\n" +
 			"⚡ Мгновенные Telegram алерты\n" +
@@ -791,9 +795,9 @@ func (h *WebhookHandler) editVIPInfo(chatID int64, msgID int, lang string) {
 			"📈 Полный архив кластеров + экспорт CSV\n" +
 			"🔥 Персональный список горячих кошельков\n\n" +
 			"💳 <b>Оплата:</b> Telegram Stars или крипто\n\n" +
-			"Свяжитесь с @support для активации."
+			"Свяжитесь с @StarkWonder для активации."
 	} else {
-		body = "👑 <b>VIP Pass — Smart Cluster Terminal</b>\n\n" +
+		body = "👑 <b>VIP Pass — Smart Cluster Terminal</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
 			"<b>What's included:</b>\n" +
 			"🔓 100% unmasked wallet addresses\n" +
 			"⚡ Instant Telegram alerts\n" +
@@ -801,7 +805,7 @@ func (h *WebhookHandler) editVIPInfo(chatID int64, msgID int, lang string) {
 			"📈 Full cluster history + CSV export\n" +
 			"🔥 Personalized hot wallet rankings\n\n" +
 			"💳 <b>Payment:</b> Telegram Stars or Crypto\n\n" +
-			"Contact @support for activation."
+			"Contact @StarkWonder for activation."
 	}
 
 	btnText := "🔑 Buy VIP"
@@ -815,7 +819,7 @@ func (h *WebhookHandler) editVIPInfo(chatID int64, msgID int, lang string) {
 
 	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: btnText, URL: "https://t.me/support"}},
+			{{Text: btnText, URL: "https://t.me/StarkWonder"}},
 			{{Text: backText, CallbackData: "cb:menu"}},
 		},
 	}
@@ -827,7 +831,7 @@ func (h *WebhookHandler) editVIPInfo(chatID int64, msgID int, lang string) {
 func (h *WebhookHandler) editHelp(chatID int64, msgID int, lang string) {
 	var body string
 	if lang == "ru" {
-		body = "❓ <b>Помощь — команды бота</b>\n\n" +
+		body = "❓ <b>Помощь — команды бота</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
 			"<code>/start</code> — главное меню\n" +
 			"<code>/watch <addr> [заметка]</code> — добавить кошелёк в watchlist\n" +
 			"<code>/watchlist</code> — показать watchlist\n" +
@@ -837,7 +841,7 @@ func (h *WebhookHandler) editHelp(chatID int64, msgID int, lang string) {
 			"Система отслеживает покупки на DEX и сигнализирует, " +
 			"когда ≥3 умных кошелька аккумулируют один токен в течение 5 минут."
 	} else {
-		body = "❓ <b>Help — Bot Commands</b>\n\n" +
+		body = "❓ <b>Help — Bot Commands</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
 			"<code>/start</code> — main menu\n" +
 			"<code>/watch <addr> [note]</code> — add wallet to watchlist\n" +
 			"<code>/watchlist</code> — view watchlist\n" +

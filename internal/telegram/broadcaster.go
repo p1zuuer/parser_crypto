@@ -183,13 +183,39 @@ func broadcastAlert(client *Client, store *storage.Storage, alert detector.Clust
 	notified := make(map[int64]struct{}, len(users))
 
 	for _, u := range users {
-		if float64(u.MinVolume) > alert.TotalVolumeUSD {
-			continue
+		if !u.IsVIP {
+			// Free tier: check min volume $25,000+ or default, max 5 live alerts per day
+			minVol := u.MinVolume
+			if minVol < 25000 {
+				minVol = 25000
+			}
+			if float64(minVol) > alert.TotalVolumeUSD {
+				continue
+			}
+			allowed, err := store.CheckAndIncrementFreeAlert(u.UserID, 5)
+			if err != nil {
+				log.Printf("[BROADCASTER] CheckAndIncrementFreeAlert %d: %v", u.UserID, err)
+				continue
+			}
+			if !allowed {
+				continue
+			}
+		} else {
+			if float64(u.MinVolume) > alert.TotalVolumeUSD {
+				continue
+			}
 		}
+
 		if !chainNetworkMatch(alert.Chain, u) {
 			continue
 		}
-		if err := client.SendMessageWithKeyboard(u.UserID, msg, kb); err != nil {
+
+		sendMsg := msg
+		if !u.IsVIP {
+			sendMsg += "\n\n<i>💡 Free Plan: Live alert preview. Upgrade to VIP for unlimited $10k+ alerts & custom watchlist!</i>"
+		}
+
+		if err := client.SendMessageWithKeyboard(u.UserID, sendMsg, kb); err != nil {
 			log.Printf("[BROADCASTER] send to %d: %v", u.UserID, err)
 		}
 		notified[u.UserID] = struct{}{}

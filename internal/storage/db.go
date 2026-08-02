@@ -80,16 +80,11 @@ CREATE TABLE IF NOT EXISTS user_watchlists (
 	UNIQUE(user_id, wallet_address)
 );
 
-CREATE TABLE IF NOT EXISTS clusters (
-	id                   INTEGER  PRIMARY KEY AUTOINCREMENT,
-	token_address        TEXT     NOT NULL,
-	token_symbol         TEXT     NOT NULL,
-	chain                TEXT     NOT NULL,
-	buy_count            INTEGER  NOT NULL,
-	total_volume_usd     REAL     NOT NULL,
-	time_window_seconds  INTEGER  NOT NULL,
-	wallet_address       TEXT,
-	created_at           DATETIME NOT NULL
+CREATE TABLE IF NOT EXISTS alert_counts (
+	user_id    INTEGER NOT NULL,
+	date_str   TEXT    NOT NULL,
+	count      INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY(user_id, date_str)
 );
 
 CREATE INDEX IF NOT EXISTS idx_watchlists_user   ON user_watchlists(user_id);
@@ -212,6 +207,43 @@ func (s *Storage) SetUserLanguage(userID int64, lang string) error {
 	}
 	_, err := s.db.Exec(`UPDATE users SET language = ? WHERE user_id = ?`, lang, userID)
 	return err
+}
+
+// CheckAndIncrementFreeAlert checks if a free user has reached their daily limit (e.g. 5) and increments if not.
+// Returns true if the alert can be sent, false if daily limit reached.
+func (s *Storage) CheckAndIncrementFreeAlert(userID int64, maxAlerts int) (bool, error) {
+	dateStr := time.Now().UTC().Format("2006-01-02")
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+
+	var count int
+	err = tx.QueryRow(`SELECT count FROM alert_counts WHERE user_id = ? AND date_str = ?`, userID, dateStr).Scan(&count)
+	if err == sql.ErrNoRows {
+		count = 0
+	} else if err != nil {
+		return false, err
+	}
+
+	if count >= maxAlerts {
+		return false, nil
+	}
+
+	_, err = tx.Exec(
+		`INSERT INTO alert_counts (user_id, date_str, count) VALUES (?, ?, 1)
+		 ON CONFLICT(user_id, date_str) DO UPDATE SET count = count + 1`,
+		userID, dateStr,
+	)
+	if err != nil {
+		return false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // GetAllUsers returns all users (used by the alert broadcaster).
