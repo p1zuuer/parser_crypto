@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
 	"net/http"
 	"time"
@@ -31,13 +32,24 @@ func main() {
 	// 4. Initialize Telegram client
 	tgClient := telegram.NewClient(cfg.BotToken)
 
-	// 5. Initialize Cluster Detector Engine
-	// Parameters: minWallets = 3, minVolumeUSD = 1000, timeWindow = 300s, cooldown = 60s
-	clusterEngine := detector.NewClusterEngine(3, 1000.0, 300*time.Second, 60*time.Second)
+	// Set Telegram Chat Menu Button to open WebApp
+	go func() {
+		time.Sleep(3 * time.Second) // slight delay to ensure bot startup
+		webAppURL := cfg.RenderURL + "/app"
+		if err := tgClient.SetChatMenuButton(webAppURL); err != nil {
+			log.Printf("WARNING: failed to set chat menu button: %v", err)
+		} else {
+			log.Printf("INFO: successfully set Telegram chat menu button to %s", webAppURL)
+		}
+	}()
 
-	// 6. Start DEX Mock Feed Worker
+	// 5. Initialize Cluster Detector Engine
+	// Parameters: minWallets = 3, minVolumeUSD = 10000, timeWindow = 300s, cooldown = 60s
+	clusterEngine := detector.NewClusterEngine(3, 10000.0, 300*time.Second, 60*time.Second)
+
+	// 6. Start DEX Mock Feed Worker with 15 minutes interval
 	ctx := context.Background()
-	detector.StartMockFeed(ctx, clusterEngine, 2*time.Second)
+	detector.StartMockFeed(ctx, clusterEngine, 15*time.Minute)
 
 	// 7. Start Alert Broadcaster worker
 	telegram.StartAlertBroadcaster(ctx, tgClient, db, clusterEngine.AlertsChan)
@@ -52,6 +64,25 @@ func main() {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
+	})
+
+	// Serve static files from ./web on /app
+	fileServer := http.FileServer(http.Dir("./web"))
+	mux.Handle("/app/", http.StripPrefix("/app", fileServer))
+	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "./web/index.html")
+	})
+
+	// API endpoint returning cluster history as JSON
+	mux.HandleFunc("/api/clusters", func(w http.ResponseWriter, r *http.Request) {
+		clusters, err := db.GetRecentClusters(50)
+		if err != nil {
+			log.Printf("ERROR: failed to get recent clusters for API: %v", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(clusters)
 	})
 
 	// 10. Start server

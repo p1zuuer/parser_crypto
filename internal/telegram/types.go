@@ -50,9 +50,15 @@ type InlineKeyboardMarkup struct {
 
 // InlineKeyboardButton represents one button of an inline keyboard.
 type InlineKeyboardButton struct {
-	Text         string `json:"text"`
-	URL          string `json:"url,omitempty"`
-	CallbackData string `json:"callback_data,omitempty"`
+	Text         string      `json:"text"`
+	URL          string      `json:"url,omitempty"`
+	CallbackData string      `json:"callback_data,omitempty"`
+	WebApp       *WebAppInfo `json:"web_app,omitempty"`
+}
+
+// WebAppInfo describes a Web App.
+type WebAppInfo struct {
+	URL string `json:"url"`
 }
 
 // APIResponse represents the generic wrapper for Telegram API responses.

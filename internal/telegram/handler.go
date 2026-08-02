@@ -84,7 +84,22 @@ func (h *WebhookHandler) handleUpdate(update *Update) {
 		chooseLang := i18n.T(langCode, "choose_language")
 		responseText := welcome + "\n\n" + chooseLang
 
-		if err := h.client.SendMessage(chatID, responseText); err != nil {
+		// Include inline keyboard button with web_app
+		renderURL := "https://smart-cluster-bot.onrender.com"
+		replyMarkup := &InlineKeyboardMarkup{
+			InlineKeyboard: [][]InlineKeyboardButton{
+				{
+					{
+						Text: "📊 Открыть WebApp",
+						WebApp: &WebAppInfo{
+							URL: renderURL + "/app",
+						},
+					},
+				},
+			},
+		}
+
+		if err := h.client.SendMessageWithKeyboard(chatID, responseText, replyMarkup); err != nil {
 			log.Printf("[WEBHOOK] Error sending message to Telegram API for chat %d: %v", chatID, err)
 		}
 		return

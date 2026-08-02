@@ -55,6 +55,18 @@ func InitDB(dbPath string) (*Storage, error) {
 		subscribed_until DATETIME,
 		created_at DATETIME NOT NULL
 	);
+
+	CREATE TABLE IF NOT EXISTS clusters (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		token_address TEXT NOT NULL,
+		token_symbol TEXT NOT NULL,
+		chain TEXT NOT NULL,
+		buy_count INTEGER NOT NULL,
+		total_volume_usd REAL NOT NULL,
+		time_window_seconds INTEGER NOT NULL,
+		wallet_address TEXT,
+		created_at DATETIME NOT NULL
+	);
 	`
 
 	if _, err := db.Exec(query); err != nil {
@@ -212,4 +224,71 @@ func (s *Storage) SetSubscription(userID int64, durationHours int) error {
 	}
 
 	return nil
+}
+
+// ClusterRecord represents a stored cluster alert in the database.
+type ClusterRecord struct {
+	ID                int64     `json:"id" db:"id"`
+	TokenAddress      string    `json:"TokenAddress" db:"token_address"`
+	TokenSymbol       string    `json:"TokenSymbol" db:"token_symbol"`
+	Chain             string    `json:"Chain" db:"chain"`
+	BuyCount          int       `json:"BuyCount" db:"buy_count"`
+	TotalVolumeUSD    float64   `json:"TotalVolumeUSD" db:"total_volume_usd"`
+	TimeWindowSeconds int       `json:"TimeWindowSeconds" db:"time_window_seconds"`
+	WalletAddress     string    `json:"WalletAddress" db:"wallet_address"`
+	CreatedAt         time.Time `json:"CreatedAt" db:"created_at"`
+}
+
+// SaveCluster saves a cluster alert to the database.
+func (s *Storage) SaveCluster(tokenAddress, tokenSymbol, chain string, buyCount int, totalVolumeUSD float64, timeWindowSeconds int, walletAddress string) error {
+	now := time.Now().UTC()
+	_, err := s.db.Exec(
+		`INSERT INTO clusters (token_address, token_symbol, chain, buy_count, total_volume_usd, time_window_seconds, wallet_address, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		tokenAddress, tokenSymbol, chain, buyCount, totalVolumeUSD, timeWindowSeconds, walletAddress, now,
+	)
+	if err != nil {
+		return fmt.Errorf("failed to save cluster: %w", err)
+	}
+	return nil
+}
+
+// GetRecentClusters returns recent cluster alerts from the database.
+func (s *Storage) GetRecentClusters(limit int) ([]ClusterRecord, error) {
+	if limit <= 0 {
+		limit = 50
+	}
+	rows, err := s.db.Query(
+		`SELECT id, token_address, token_symbol, chain, buy_count, total_volume_usd, time_window_seconds, wallet_address, created_at FROM clusters ORDER BY id DESC LIMIT ?`,
+		limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query clusters: %w", err)
+	}
+	defer rows.Close()
+
+	var clusters []ClusterRecord
+	for rows.Next() {
+		var c ClusterRecord
+		var createdAtStr string
+		var walletAddr sql.NullString
+
+		if err := rows.Scan(&c.ID, &c.TokenAddress, &c.TokenSymbol, &c.Chain, &c.BuyCount, &c.TotalVolumeUSD, &c.TimeWindowSeconds, &walletAddr, &createdAtStr); err != nil {
+			return nil, fmt.Errorf("failed to scan cluster: %w", err)
+		}
+
+		if walletAddr.Valid {
+			c.WalletAddress = walletAddr.String
+		} else {
+			c.WalletAddress = c.TokenAddress
+		}
+
+		c.CreatedAt, _ = time.Parse("2006-01-02 15:04:05.999999999-07:00", createdAtStr)
+		if c.CreatedAt.IsZero() {
+			c.CreatedAt, _ = time.Parse("2006-01-02 15:04:05", createdAtStr)
+		}
+
+		clusters = append(clusters, c)
+	}
+
+	return clusters, nil
 }

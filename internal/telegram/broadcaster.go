@@ -23,6 +23,15 @@ func StartAlertBroadcaster(ctx context.Context, client *Client, store *storage.S
 					return
 				}
 
+				// Save cluster to DB
+				if store != nil {
+					walletAddr := alert.TokenAddress
+					if len(alert.TxHashes) > 0 {
+						walletAddr = alert.TxHashes[0]
+					}
+					_ = store.SaveCluster(alert.TokenAddress, alert.TokenSymbol, alert.Chain, alert.BuyCount, alert.TotalVolumeUSD, alert.TimeWindowSeconds, walletAddr)
+				}
+
 				users, err := store.GetAllUsers()
 				if err != nil {
 					log.Printf("ERROR: failed to get users for alert broadcast: %v", err)

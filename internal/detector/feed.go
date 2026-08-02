@@ -36,7 +36,7 @@ func StartMockFeed(ctx context.Context, engine *ClusterEngine, interval time.Dur
 
 				// Generate random wallet and amount
 				wallet := fmt.Sprintf("0xWallet%d", r.Intn(10))
-				amount := 200.0 + r.Float64()*800.0 // $200 to $1000
+				amount := 12000.0 + r.Float64()*38000.0 // $12,000 to $50,000
 				txHash := fmt.Sprintf("0xTx%d%d", r.Int63(), r.Int63())
 
 				event := SwapEvent{

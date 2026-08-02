@@ -70,3 +70,39 @@ func (c *Client) SendMessageWithKeyboard(chatID int64, text string, replyMarkup 
 
 	return nil
 }
+
+// SetChatMenuButton sets the chat menu button for WebApp.
+func (c *Client) SetChatMenuButton(webAppURL string) error {
+	reqBody := map[string]interface{}{
+		"menu_button": map[string]interface{}{
+			"type": "web_app",
+			"text": "📊 WebApp",
+			"web_app": map[string]string{
+				"url": webAppURL,
+			},
+		},
+	}
+
+	bodyBytes, err := json.Marshal(reqBody)
+	if err != nil {
+		return fmt.Errorf("failed to marshal set chat menu button request: %w", err)
+	}
+
+	url := c.apiBaseURL + "/setChatMenuButton"
+	resp, err := c.httpClient.Post(url, "application/json", bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		return fmt.Errorf("failed to send setChatMenuButton request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var apiResp APIResponse
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return fmt.Errorf("failed to decode telegram response: %w", err)
+	}
+
+	if !apiResp.Ok {
+		return fmt.Errorf("telegram api error: %s (code: %d)", apiResp.Description, apiResp.ErrorCode)
+	}
+
+	return nil
+}

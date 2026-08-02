@@ -10,6 +10,7 @@ type Config struct {
 	Port         string
 	WebhookURL   string
 	DatabasePath string
+	RenderURL    string
 }
 
 // Load loads configuration from environment variables with sensible defaults.
@@ -24,10 +25,19 @@ func Load() *Config {
 		dbPath = "./data/bot.db"
 	}
 
+	renderURL := os.Getenv("RENDER_URL")
+	if renderURL == "" {
+		renderURL = os.Getenv("WEBHOOK_URL")
+		if renderURL == "" {
+			renderURL = "https://smart-cluster-bot.onrender.com"
+		}
+	}
+
 	return &Config{
 		BotToken:     os.Getenv("BOT_TOKEN"),
 		Port:         port,
 		WebhookURL:   os.Getenv("WEBHOOK_URL"),
 		DatabasePath: dbPath,
+		RenderURL:    renderURL,
 	}
 }
