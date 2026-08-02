@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"io/fs"
 	"log"
 	"net/http"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"smart-cluster-bot/internal/i18n"
 	"smart-cluster-bot/internal/storage"
 	"smart-cluster-bot/internal/telegram"
+	"smart-cluster-bot/web"
 )
 
 func main() {
@@ -66,11 +68,20 @@ func main() {
 		w.Write([]byte("OK"))
 	})
 
-	// Serve static files from ./web on /app
-	fileServer := http.FileServer(http.Dir("./web"))
-	mux.Handle("/app/", http.StripPrefix("/app", fileServer))
+	// Setup embed static file server for /app and /app/
+	fileServer := http.FileServer(http.FS(web.WebFS))
+
+	mux.Handle("/app/", http.StripPrefix("/app/", fileServer))
 	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
-		http.ServeFile(w, r, "./web/index.html")
+		indexHTML, err := fs.ReadFile(web.WebFS, "index.html")
+		if err != nil {
+			log.Printf("ERROR: failed to read embedded index.html: %v", err)
+			http.Error(w, "Not Found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(indexHTML)
 	})
 
 	// API endpoint returning cluster history as JSON
@@ -87,6 +98,11 @@ func main() {
 
 	// 10. Start server
 	addr := ":" + cfg.Port
+	baseURL := cfg.RenderURL
+	if baseURL == "" {
+		baseURL = "http://localhost" + addr
+	}
+	log.Printf("[WEBAPP] Serving WebApp at: %s/app", baseURL)
 	log.Printf("INFO: Starting smart-cluster-bot server on port %s...", cfg.Port)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("FATAL: Server failed: %v", err)
