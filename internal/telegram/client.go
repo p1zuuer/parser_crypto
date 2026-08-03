@@ -97,6 +97,14 @@ func (c *Client) AnswerCallbackQuery(queryID, text string) error {
 	})
 }
 
+// DeleteMessage deletes a message from the chat.
+func (c *Client) DeleteMessage(chatID int64, messageID int) error {
+	return c.post("deleteMessage", map[string]interface{}{
+		"chat_id":    chatID,
+		"message_id": messageID,
+	})
+}
+
 // SetWebhook registers webhookURL as the target for Telegram updates.
 func (c *Client) SetWebhook(webhookURL string) error {
 	ep := fmt.Sprintf("%s/bot%s/setWebhook?url=%s",

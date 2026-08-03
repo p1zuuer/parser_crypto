@@ -516,6 +516,19 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 
 // ── Edit-in-place helpers ──────────────────────────────────────────────────────
 
+func (h *WebhookHandler) smartEdit(chatID int64, msgID int, text string, markup *InlineKeyboardMarkup) {
+	// 1. Ensure the text has the wide UI fix applied
+	text = wideText(text)
+
+	// 2. Try to edit the message as standard text
+	if err := h.client.EditMessageText(chatID, msgID, text, markup); err != nil {
+		// 3. If edit fails (e.g., because the original message is a Photo),
+		// delete the old photo message and send a fresh text message instead.
+		_ = h.client.DeleteMessage(chatID, msgID)
+		_ = h.client.SendMessageWithKeyboard(chatID, text, markup)
+	}
+}
+
 func (h *WebhookHandler) editStartMenu(chatID int64, msgID int, firstName string, user *storage.User) {
 	h.sendStartMenu(chatID, firstName, user)
 }
@@ -532,7 +545,7 @@ func (h *WebhookHandler) editRecentClusters(chatID int64, msgID int, lang string
 		if lang == "ru" {
 			msg = "🔥 <b>Свежие кластеры</b>\n\nДанных пока нет."
 		}
-		h.client.EditMessageText(chatID, msgID, msg, backToMenuKB(lang))
+		h.smartEdit(chatID, msgID, msg, backToMenuKB(lang))
 		return
 	}
 	var sb strings.Builder
@@ -549,7 +562,7 @@ func (h *WebhookHandler) editRecentClusters(chatID int64, msgID int, lang string
 			c.TokenAddress,
 		))
 	}
-	h.client.EditMessageText(chatID, msgID, sb.String(), backToMenuKB(lang))
+	h.smartEdit(chatID, msgID, sb.String(), backToMenuKB(lang))
 }
 
 func (h *WebhookHandler) editStats24h(chatID int64, msgID int, lang string) {
@@ -585,7 +598,7 @@ func (h *WebhookHandler) editStats24h(chatID int64, msgID int, lang string) {
 			body = "❌ Ошибка загрузки статистики."
 		}
 	}
-	h.client.EditMessageText(chatID, msgID, body, backToMenuKB(lang))
+	h.smartEdit(chatID, msgID, body, backToMenuKB(lang))
 }
 
 func (h *WebhookHandler) editWatchlistMenu(chatID int64, msgID int, userID int64, lang string) {
@@ -595,7 +608,7 @@ func (h *WebhookHandler) editWatchlistMenu(chatID int64, msgID int, userID int64
 		if lang == "ru" {
 			msg = "⭐ <b>Мой Watchlist</b>\n\nСписок пуст.\n\nДобавьте командой: <code>/watch <address> [заметка]</code>"
 		}
-		h.client.EditMessageText(chatID, msgID, msg, backToMenuKB(lang))
+		h.smartEdit(chatID, msgID, msg, backToMenuKB(lang))
 		return
 	}
 	var sb strings.Builder
@@ -626,7 +639,7 @@ func (h *WebhookHandler) editWatchlistMenu(chatID int64, msgID int, userID int64
 		backText = "⬅️ Назад"
 	}
 	rows = append(rows, []InlineKeyboardButton{{Text: backText, CallbackData: "cb:menu"}})
-	h.client.EditMessageText(chatID, msgID, sb.String(), &InlineKeyboardMarkup{InlineKeyboard: rows})
+	h.smartEdit(chatID, msgID, sb.String(), &InlineKeyboardMarkup{InlineKeyboard: rows})
 }
 
 func (h *WebhookHandler) editHotWallets(chatID int64, msgID int, lang string) {
@@ -636,7 +649,7 @@ func (h *WebhookHandler) editHotWallets(chatID int64, msgID int, lang string) {
 		if lang == "ru" {
 			msg = "🔥 <b>Горячие кошельки</b>\n\nДанных пока нет."
 		}
-		h.client.EditMessageText(chatID, msgID, msg, backToMenuKB(lang))
+		h.smartEdit(chatID, msgID, msg, backToMenuKB(lang))
 		return
 	}
 	var sb strings.Builder
@@ -656,7 +669,7 @@ func (h *WebhookHandler) editHotWallets(chatID int64, msgID int, lang string) {
 			w.ClusterCount, fmtFloat(w.TotalVolumeUSD),
 		))
 	}
-	h.client.EditMessageText(chatID, msgID, sb.String(), backToMenuKB(lang))
+	h.smartEdit(chatID, msgID, sb.String(), backToMenuKB(lang))
 }
 
 // ── Settings menu ──────────────────────────────────────────────────────────────
@@ -724,7 +737,7 @@ func (h *WebhookHandler) editSettingsMenu(chatID int64, msgID int, userID int64,
 			{{Text: backText, CallbackData: "cb:menu"}},
 		},
 	}
-	h.client.EditMessageText(chatID, msgID, body, kb)
+	h.smartEdit(chatID, msgID, body, kb)
 }
 
 func (h *WebhookHandler) handleVolumeChange(chatID int64, msgID int, userID int64, username, lang, data string) {
