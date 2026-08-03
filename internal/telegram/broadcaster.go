@@ -83,9 +83,15 @@ func formatAlertMessage(alert detector.ClusterAlert) string {
 		avgEntry = alert.TotalVolumeUSD
 	}
 
+	badge := "🟢 STAGE: INITIAL ACCUMULATION (SAFE ENTRY)"
+	if alert.TimeWindowSeconds > 120 {
+		badge = "⚠️ STAGE: LATE ENTRY - HIGH RISK"
+	}
+
 	return fmt.Sprintf(
 		"<b>🚨 CLUSTER & INTELLIGENCE ALERT!</b>\n\n"+
 			"%s <b>%s</b> | <code>%s</code>\n\n"+
+			"%s\n\n"+
 			"💰 Total Cluster Volume: <b>$%s</b>\n"+
 			"👛 Smart Wallets Involved: <b>%d</b>\n"+
 			"📊 Average Entry Price: <b>$%s</b>\n"+
@@ -95,6 +101,7 @@ func formatAlertMessage(alert detector.ClusterAlert) string {
 		chainEmoji,
 		html.EscapeString(alert.TokenSymbol),
 		html.EscapeString(alert.Chain),
+		badge,
 		html.EscapeString(volStr),
 		alert.BuyCount,
 		html.EscapeString(fmtFloat(avgEntry)),
@@ -104,17 +111,18 @@ func formatAlertMessage(alert detector.ClusterAlert) string {
 	)
 }
 
-// alertKeyboard builds the interactive inline keyboard attached to every alert with analytical links.
+// alertKeyboard builds the interactive inline keyboard attached to every alert with analytical links and 1-click buy buttons.
 func alertKeyboard(alert detector.ClusterAlert) *InlineKeyboardMarkup {
+	contract := alert.TokenAddress
 	return &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{
-				{Text: "📈 DexScreener", URL: dexScreenerURL(alert.Chain, alert.TokenAddress)},
-				{Text: "📊 Birdeye / GMGN", URL: birdeyeURL(alert.Chain, alert.TokenAddress)},
+				{Text: "⚡ Buy on Photon", URL: "https://photon-sol.tinyastro.io/en/r/@clusterbot/" + contract},
+				{Text: "🎯 Buy via Trojan", URL: "https://t.me/solana_trojanbot?start=r-clusterbot-" + contract},
 			},
 			{
-				{Text: "🛡 RugCheck / Safety", URL: contractCheckURL(alert.Chain, alert.TokenAddress)},
-				{Text: "🔍 Explorer", URL: explorerURL(alert.Chain, alert.TokenAddress)},
+				{Text: "📊 DexScreener", URL: "https://dexscreener.com/solana/" + contract},
+				{Text: "🛡 RugCheck", URL: "https://rugcheck.xyz/tokens/" + contract},
 			},
 			{
 				{Text: "⭐ Track Wallet", CallbackData: "cb:watchlist"},

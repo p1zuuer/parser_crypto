@@ -45,6 +45,9 @@ func main() {
 	if err != nil {
 		log.Fatalf("FATAL: storage: %v", err)
 	}
+	if err := db.SeedWallets(); err != nil {
+		log.Printf("WARNING: SeedWallets: %v", err)
+	}
 
 	// ── 4. Telegram client ─────────────────────────────────────────────────────
 	tgClient := telegram.NewClient(cfg.BotToken)
@@ -71,9 +74,9 @@ func main() {
 	}
 
 	// ── 5. Cluster detection engine ────────────────────────────────────────────
-	// Parameters: ≥3 distinct wallets, ≥$10 000 aggregate volume,
-	// 5-minute rolling window, 60-second alert cooldown per token.
-	engine := detector.NewClusterEngine(3, 10_000.0, 5*time.Minute, 60*time.Second)
+	// Parameters: ≥2 distinct wallets, ≥$200 aggregate volume,
+	// 3-minute rolling window, 60-second alert cooldown per token.
+	engine := detector.NewClusterEngine(2, 200.0, 3*time.Minute, 60*time.Second)
 
 	ctx := context.Background()
 
