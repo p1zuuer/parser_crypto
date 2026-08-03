@@ -199,10 +199,8 @@ func (h *WebhookHandler) editStartMenu(chatID int64, msgID int, firstName string
 
 func (h *WebhookHandler) buildStartMenuText(firstName string, user *storage.User) string {
 	plan := "FREE"
-	planIcon := "⬜"
 	if user.IsVIP {
-		plan = "VIP"
-		planIcon = "👑"
+		plan = "VIP 👑"
 	}
 	lang := user.Language
 	nets := enabledNetworksRaw(user)
@@ -210,35 +208,29 @@ func (h *WebhookHandler) buildStartMenuText(firstName string, user *storage.User
 
 	if lang == "ru" {
 		return fmt.Sprintf(
-			"⬛ <b>SMART CLUSTER TERMINAL v2.0</b>\n"+
-				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
-				"<code>> SYSTEM_BOOT........ [OK]\n"+
-				"> AUTH_USER......... %s\n"+
-				"> ACCESS_LEVEL...... %s %s\n"+
-				"> MIN_VOL_FILTER.... $%s\n"+
-				"> ACTIVE_CHAINS..... %s\n"+
-				"> LANG.............. RU\n"+
-				"──────────────────────\n"+
-				"[ 🟢 TERMINAL ONLINE ]</code>\n\n"+
+			"💎 <b>SMART CLUSTER TERMINAL</b>\n"+
+				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n"+
+				"👋 <b>Привет, %s!</b>\n\n"+
+				"📊 Аналитика и безопасность смарт-денег в реальном времени.\n\n"+
+				"👤 План: <b>%s</b>\n"+
+				"🔔 Мин. объём: <b>$%s</b>\n"+
+				"🌐 Сети: <b>%s</b>\n"+
+				"🌐 Язык: <b>Русский (RU)</b>\n\n"+
 				"Выберите модуль:",
-			name, planIcon, plan,
-			fmtVolume(user.MinVolume), nets,
+			name, plan, fmtVolume(user.MinVolume), nets,
 		)
 	}
 	return fmt.Sprintf(
-		"⬛ <b>SMART CLUSTER TERMINAL v2.0</b>\n"+
-			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
-			"<code>> SYSTEM_BOOT........ [OK]\n"+
-			"> AUTH_USER......... %s\n"+
-			"> ACCESS_LEVEL...... %s %s\n"+
-			"> MIN_VOL_FILTER.... $%s\n"+
-			"> ACTIVE_CHAINS..... %s\n"+
-			"> LANG.............. EN\n"+
-			"──────────────────────\n"+
-			"[ 🟢 TERMINAL ONLINE ]</code>\n\n"+
+		"💎 <b>SMART CLUSTER TERMINAL</b>\n"+
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n"+
+			"👋 <b>Hello, %s!</b>\n\n"+
+			"📊 Real-time Smart Money Analytics & Security.\n\n"+
+			"👤 Plan: <b>%s</b>\n"+
+			"🔔 Min Volume: <b>$%s</b>\n"+
+			"🌐 Networks: <b>%s</b>\n"+
+			"🌐 Language: <b>English (EN)</b>\n\n"+
 			"Select module:",
-		name, planIcon, plan,
-		fmtVolume(user.MinVolume), nets,
+		name, plan, fmtVolume(user.MinVolume), nets,
 	)
 }
 
@@ -385,12 +377,10 @@ func (h *WebhookHandler) buildStats24hContent(lang string) (string, *InlineKeybo
 		body = "📈 <b>СТАТИСТИКА — 24h СКАН</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
 			fmt.Sprintf(
-				"<code>> CLUSTERS_FOUND..... %d\n"+
-					"> TOTAL_VOLUME...... $%s\n"+
-					"> TOP_TOKEN......... %s\n"+
-					"> TOP_CHAIN......... %s\n"+
-					"──────────────────────\n"+
-					"[ 🟢 SCAN COMPLETE ]</code>",
+				"📊 Найдено кластеров: <b>%d</b>\n"+
+					"💰 Общий объём: <b>$%s</b>\n"+
+					"🪙 Топ токен: <b>%s</b>\n"+
+					"🌐 Топ сеть: <b>%s</b>",
 				stats.TotalClusters,
 				fmtFloat(stats.TotalVolumeUSD),
 				topToken,
@@ -400,12 +390,10 @@ func (h *WebhookHandler) buildStats24hContent(lang string) (string, *InlineKeybo
 		body = "📈 <b>STATISTICS — 24h SCAN</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
 			fmt.Sprintf(
-				"<code>> CLUSTERS_FOUND..... %d\n"+
-					"> TOTAL_VOLUME...... $%s\n"+
-					"> TOP_TOKEN......... %s\n"+
-					"> TOP_CHAIN......... %s\n"+
-					"──────────────────────\n"+
-					"[ 🟢 SCAN COMPLETE ]</code>",
+				"📊 Clusters Found: <b>%d</b>\n"+
+					"💰 Total Volume: <b>$%s</b>\n"+
+					"🪙 Top Token: <b>%s</b>\n"+
+					"🌐 Top Chain: <b>%s</b>",
 				stats.TotalClusters,
 				fmtFloat(stats.TotalVolumeUSD),
 				topToken,
@@ -731,26 +719,26 @@ func (h *WebhookHandler) sendVIPMenu(chatID int64, lang string) {
 func (h *WebhookHandler) buildVIPContent(lang string) (string, *InlineKeyboardMarkup) {
 	var body string
 	if lang == "ru" {
-		body = "👑 <b>VIP ACCESS — SMART CLUSTER TERMINAL</b>\n" +
+		body = "👑 <b>VIP ПАСС — SMART CLUSTER TERMINAL</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"<code>> MASK.............. DISABLED\n" +
-			"> ALERTS............ UNLIMITED\n" +
-			"> ARCHIVE........... FULL\n" +
-			"> EXPORT............ CSV_ON\n" +
-			"> HOT_WALLETS....... PRIORITY\n" +
-			"──────────────────────\n" +
-			"[ 💳 PRICE: $9.99 / 30d ]</code>\n\n" +
+			"🔒 <b>Полный доступ ко всем функциям без ограничений:</b>\n\n" +
+			"• 🚫 Маскирование адресов отключено\n" +
+			"• 🔔 Неограниченные алерты\n" +
+			"• 📊 Полный архив и история\n" +
+			"• 📊 Экспорт в CSV\n" +
+			"• 🔥 Приоритет в горячих кошельках\n\n" +
+			"💳 <b>Цена: $9.99 / 30 дней</b>\n\n" +
 			"Выберите способ оплаты:"
 	} else {
-		body = "👑 <b>VIP ACCESS — SMART CLUSTER TERMINAL</b>\n" +
+		body = "👑 <b>VIP PASS — SMART CLUSTER TERMINAL</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"<code>> MASK.............. DISABLED\n" +
-			"> ALERTS............ UNLIMITED\n" +
-			"> ARCHIVE........... FULL\n" +
-			"> EXPORT............ CSV_ON\n" +
-			"> HOT_WALLETS....... PRIORITY\n" +
-			"──────────────────────\n" +
-			"[ 💳 PRICE: $9.99 / 30d ]</code>\n\n" +
+			"🔒 <b>Full access to all features without limits:</b>\n\n" +
+			"• 🚫 Address unmasking active\n" +
+			"• 🔔 Unlimited real-time alerts\n" +
+			"• 📊 Full history & archives\n" +
+			"• 📊 CSV Export enabled\n" +
+			"• 🔥 Priority in Hot Wallets\n\n" +
+			"💳 <b>Price: $9.99 / 30 days</b>\n\n" +
 			"Select payment method:"
 	}
 	kb := &InlineKeyboardMarkup{
@@ -775,38 +763,23 @@ func (h *WebhookHandler) buildVIPContent(lang string) (string, *InlineKeyboardMa
 // handleSuccessfulPayment activates VIP and sends the confirmation message.
 
 func (h *WebhookHandler) editPaymentStars(chatID int64, msgID int, lang string) {
-	// Edit the current bubble to show the Stars info screen first.
 	var body string
 	if lang == "ru" {
 		body = "⭐ <b>ОПЛАТА — TELEGRAM STARS</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"<code>> METHOD......... STARS (XTR)\n" +
-			"> AMOUNT......... 250 XTR\n" +
-			"> DURATION....... 30 DAYS\n" +
-			"> AUTO_ACTIVATE.. YES\n" +
-			"──────────────────────\n" +
-			"[ ⚡ INSTANT ACTIVATION ]</code>\n\n" +
-			"Нажмите кнопку ниже — откроется нативный экран оплаты Telegram Stars.\n" +
-			"VIP активируется автоматически после оплаты."
+			"📌 <b>Товар:</b> VIP Pass (30 Дней)\n" +
+			"⭐ <b>Стоимость:</b> 250 Stars (XTR)\n" +
+			"⚡ <b>Активация:</b> Автоматически после оплаты\n\n" +
+			"Ниже отправлен официальный счёт на оплату 👇"
 	} else {
 		body = "⭐ <b>PAYMENT — TELEGRAM STARS</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"<code>> METHOD......... STARS (XTR)\n" +
-			"> AMOUNT......... 250 XTR\n" +
-			"> DURATION....... 30 DAYS\n" +
-			"> AUTO_ACTIVATE.. YES\n" +
-			"──────────────────────\n" +
-			"[ ⚡ INSTANT ACTIVATION ]</code>\n\n" +
-			"Tap the button below — Telegram's native Stars payment screen will open.\n" +
-			"VIP activates automatically after payment."
+			"📌 <b>Item:</b> VIP Pass (30 Days)\n" +
+			"⭐ <b>Amount:</b> 250 Stars (XTR)\n" +
+			"⚡ <b>Activation:</b> Instant after payment\n\n" +
+			"The official Telegram Stars invoice is sent below 👇"
 	}
-	if err := h.client.EditMessageText(chatID, msgID, body, backToMenuKB(lang)); err != nil {
-		log.Printf("[HANDLER] editPaymentStars edit %d/%d: %v", chatID, msgID, err)
-	}
-
-	// Send the actual Stars invoice as a new message immediately after.
-	// Telegram requires sendInvoice to be a separate message — it cannot be
-	// embedded inside editMessageText.
+	_ = h.client.EditMessageText(chatID, msgID, body, backToMenuKB(lang))
 	h.sendStarsInvoice(chatID, lang)
 }
 
@@ -824,23 +797,23 @@ func (h *WebhookHandler) sendStarsInvoice(chatID int64, lang string) {
 	}
 
 	req := &SendInvoiceRequest{
-		ChatID:        chatID,
-		Title:         title,
-		Description:   description,
-		Payload:       "vip_stars_30d", // validated in handleSuccessfulPayment
-		ProviderToken: "",              // MUST be empty string for XTR
-		Currency:      "XTR",
+		ChatID:         chatID,
+		Title:          title,
+		Description:    description,
+		Payload:        "vip_stars_30d",
+		ProviderToken:  "", // MUST be empty string for XTR
+		Currency:       "XTR",
+		StartParameter: "stars_vip_30d", // CRITICAL for Telegram API acceptance
 		Prices: []LabeledPrice{
-			{Label: "VIP Pass (30 days)", Amount: 250}, // 250 XTR
+			{Label: "VIP Pass (30 days)", Amount: 250},
 		},
 	}
 
 	if err := h.client.SendInvoice(req); err != nil {
 		log.Printf("[HANDLER] SendInvoice Stars %d: %v", chatID, err)
-		// Graceful fallback: let the user know to contact support.
-		errMsg := "⚠️ <code>STARS_INVOICE_ERROR</code>\n\nContact @StarkWonder to purchase manually."
-		if lang == "ru" {
-			errMsg = "⚠️ <code>STARS_INVOICE_ERROR</code>\n\nСвяжитесь с @StarkWonder для ручной покупки."
+		errMsg := "⚠️ Ошибка создания чека Telegram Stars. Попробуйте ещё раз."
+		if lang == "en" {
+			errMsg = "⚠️ Telegram Stars invoice error. Please try again."
 		}
 		_ = h.client.SendMessage(chatID, errMsg)
 	}
