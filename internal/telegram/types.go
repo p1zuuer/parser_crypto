@@ -107,12 +107,13 @@ type LabeledPrice struct {
 
 // SendInvoiceRequest is the body sent to sendInvoice.
 type SendInvoiceRequest struct {
-	ChatID        int64                 `json:"chat_id"`
-	Title         string                `json:"title"`
-	Description   string                `json:"description"`
-	Payload       string                `json:"payload"`
-	ProviderToken string                `json:"provider_token"`
-	Currency      string                `json:"currency"`
-	Prices        []LabeledPrice        `json:"prices"`
-	ReplyMarkup   *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
+	ChatID         int64                 `json:"chat_id"`
+	Title          string                `json:"title"`
+	Description    string                `json:"description"`
+	Payload        string                `json:"payload"`
+	ProviderToken  string                `json:"provider_token"`
+	Currency       string                `json:"currency"`
+	Prices         []LabeledPrice        `json:"prices"`
+	StartParameter string                `json:"start_parameter,omitempty"`
+	ReplyMarkup    *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 }

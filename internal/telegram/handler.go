@@ -739,7 +739,7 @@ func (h *WebhookHandler) sendStarsInvoice(chatID int64, userID int64, lang strin
 	payload := fmt.Sprintf("vip_stars_%d", userID)
 
 	// Note: ProviderToken MUST be empty for Telegram Stars (XTR)
-	if err := h.client.SendInvoice(chatID, title, desc, payload, "", "XTR", prices, nil); err != nil {
+	if err := h.client.SendInvoice(chatID, title, desc, payload, "", "XTR", prices, "stars_vip_30d", nil); err != nil {
 		log.Printf("[HANDLER] SendInvoice (Stars) failed: %v", err)
 	}
 }
@@ -769,45 +769,35 @@ func (h *WebhookHandler) editPaymentCryptoBot(chatID int64, msgID int, userID in
 
 	var body string
 	if lang == "ru" {
-		body = "🤖 <b>ОПЛАТА — CRYPTOBOT</b>\n" +
+		body = "💳 <b>Оплата через CryptoBot</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			fmt.Sprintf(
-				"<code>> METHOD......... CRYPTOBOT\n"+
-					"> AMOUNT......... $9.99 USDT\n"+
-					"> INVOICE_ID..... %d\n"+
-					"> DURATION....... 30 DAYS\n"+
-					"> AUTO_ACTIVATE.. YES\n"+
-					"──────────────────────\n"+
-					"[ ⚡ INVOICE READY ]</code>\n\n"+
-					"После оплаты нажмите «Проверить оплату».",
-				invoice.ID,
-			)
+			"📌 <b>Товар:</b> VIP Pass (30 Дней)\n" +
+			"💵 <b>Сумма:</b> $9.99 USDT / TON\n" +
+			"⚡ <b>Активация:</b> Автоматически после оплаты\n\n" +
+			"Перейдите по ссылке для оплаты, затем нажмите кнопку ниже для проверки:"
 	} else {
-		body = "🤖 <b>PAYMENT — CRYPTOBOT</b>\n" +
+		body = "💳 <b>CryptoBot Payment</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			fmt.Sprintf(
-				"<code>> METHOD......... CRYPTOBOT\n"+
-					"> AMOUNT......... $9.99 USDT\n"+
-					"> INVOICE_ID..... %d\n"+
-					"> DURATION....... 30 DAYS\n"+
-					"> AUTO_ACTIVATE.. YES\n"+
-					"──────────────────────\n"+
-					"[ ⚡ INVOICE READY ]</code>\n\n"+
-					"After paying, tap «Check Payment».",
-				invoice.ID,
-			)
+			"📌 <b>Item:</b> VIP Pass (30 Days)\n" +
+			"💵 <b>Amount:</b> $9.99 USDT / TON\n" +
+			"⚡ <b>Activation:</b> Instant after payment\n\n" +
+			"Click the link to pay, then press the button below to verify:"
 	}
 
-	checkBtn := tr(lang, "🔄 Check Payment", "🔄 Проверить оплату")
+	payBtnText := tr(lang, "🔗 Pay via CryptoBot", "🔗 Оплатить через CryptoBot")
+	checkBtnText := tr(lang, "🔄 Check Payment", "🔄 Проверить оплату")
+	backBtnText := tr(lang, "⬅️ Back", "⬅️ Назад")
+
 	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: tr(lang, "💳 Pay Invoice", "💳 Оплатить счёт"), URL: invoice.PayURL}},
-			{{Text: checkBtn, CallbackData: fmt.Sprintf("pay:cbcheck:%d", invoice.ID)}},
-			{{Text: tr(lang, "⬅️ Back", "⬅️ Назад"), CallbackData: "cb:vip"}},
+			{{Text: payBtnText, URL: invoice.PayURL}},
+			{{Text: checkBtnText, CallbackData: fmt.Sprintf("pay:cbcheck:%d", invoice.ID)}},
+			{{Text: backBtnText, CallbackData: "cb:vip"}},
 		},
 	}
+
 	if err := h.client.EditMessageText(chatID, msgID, body, kb); err != nil {
-		log.Printf("[HANDLER] editPaymentCryptoBot final %d/%d: %v", chatID, msgID, err)
+		log.Printf("[HANDLER] editPaymentCryptoBot %d: %v", chatID, err)
 	}
 }
 

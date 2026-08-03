@@ -64,16 +64,17 @@ func (c *Client) SendPhoto(chatID int64, photoURL, caption string, kb *InlineKey
 }
 
 // SendInvoice sends a native Telegram invoice (used for Telegram Stars XTR).
-func (c *Client) SendInvoice(chatID int64, title, description, payload, providerToken, currency string, prices []LabeledPrice, kb *InlineKeyboardMarkup) error {
+func (c *Client) SendInvoice(chatID int64, title, description, payload, providerToken, currency string, prices []LabeledPrice, startParameter string, kb *InlineKeyboardMarkup) error {
 	return c.post("sendInvoice", SendInvoiceRequest{
-		ChatID:        chatID,
-		Title:         title,
-		Description:   description,
-		Payload:       payload,
-		ProviderToken: providerToken,
-		Currency:      currency,
-		Prices:        prices,
-		ReplyMarkup:   kb,
+		ChatID:         chatID,
+		Title:          title,
+		Description:    description,
+		Payload:        payload,
+		ProviderToken:  providerToken,
+		Currency:       currency,
+		Prices:         prices,
+		StartParameter: startParameter,
+		ReplyMarkup:    kb,
 	})
 }
 
