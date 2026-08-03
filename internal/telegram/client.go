@@ -63,19 +63,16 @@ func (c *Client) SendPhoto(chatID int64, photoURL, caption string, kb *InlineKey
 	})
 }
 
-// SendInvoice sends a native Telegram invoice (used for Telegram Stars XTR).
-func (c *Client) SendInvoice(chatID int64, title, description, payload, providerToken, currency string, prices []LabeledPrice, startParameter string, kb *InlineKeyboardMarkup) error {
-	return c.post("sendInvoice", SendInvoiceRequest{
-		ChatID:         chatID,
-		Title:          title,
-		Description:    description,
-		Payload:        payload,
-		ProviderToken:  providerToken,
-		Currency:       currency,
-		Prices:         prices,
-		StartParameter: startParameter,
-		ReplyMarkup:    kb,
-	})
+// SendInvoice sends a native Telegram invoice via the sendInvoice API method.
+// Use this for Telegram Stars (XTR) payments. The req.ProviderToken MUST be
+// an empty string (not omitted) for Stars invoices, and req.Currency must be "XTR".
+// Telegram will deliver a SuccessfulPayment message to the webhook on completion.
+func (c *Client) SendInvoice(req *SendInvoiceRequest) error {
+	if err := c.post("sendInvoice", req); err != nil {
+		log.Printf("[TELEGRAM] SendInvoice error: %v", err)
+		return err
+	}
+	return nil
 }
 
 // SendMessage sends a plain-text (Markdown) message to chatID.
