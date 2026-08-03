@@ -24,6 +24,8 @@ type Config struct {
 	CryptoBotToken string
 	// DatabasePath is the filesystem path for the SQLite database file.
 	DatabasePath string
+	// BotUsername is the bot's Telegram @username used for referral links.
+	BotUsername string
 }
 
 const defaultPort = "8080"
@@ -40,6 +42,7 @@ func Load() (*Config, error) {
 		WebAppURL:      os.Getenv("WEBAPP_URL"),
 		CryptoBotToken: os.Getenv("CRYPTOBOT_TOKEN"),
 		DatabasePath:   os.Getenv("DATABASE_PATH"),
+		BotUsername:    os.Getenv("BOT_USERNAME"),
 	}
 
 	if cfg.BotToken == "" {

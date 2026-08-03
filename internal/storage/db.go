@@ -114,6 +114,8 @@ CREATE INDEX IF NOT EXISTS idx_watchlists_user   ON user_watchlists(user_id);
 CREATE INDEX IF NOT EXISTS idx_watchlists_wallet ON user_watchlists(wallet_address);
 CREATE INDEX IF NOT EXISTS idx_clusters_chain    ON clusters(chain);
 CREATE INDEX IF NOT EXISTS idx_clusters_created  ON clusters(created_at);
+
+CREATE TABLE IF NOT EXISTS referrals (id INTEGER PRIMARY KEY AUTOINCREMENT, referrer_id INTEGER NOT NULL, referred_id INTEGER NOT NULL UNIQUE, commission_usd REAL DEFAULT 0, created_at INTEGER NOT NULL);
 `
 
 // ── Init ───────────────────────────────────────────────────────────────────────
@@ -534,6 +536,25 @@ func (s *Storage) GetTopWallets(hours int, limit int) ([]WalletHeat, error) {
 		return nil, err
 	}
 	return result, nil
+}
+
+func (s *Storage) AddReferral(referrerID, newUserID int64) error {
+	_, err := s.db.Exec(`INSERT OR IGNORE INTO referrals (referrer_id, referred_id, created_at) VALUES (?, ?, ?)`, referrerID, newUserID, time.Now().Unix())
+	return err
+}
+
+type ReferralStats struct {
+	TotalReferrals   int
+	TotalEarningsUSD float64
+}
+
+func (s *Storage) GetReferralStats(userID int64) (*ReferralStats, error) {
+	row := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(commission_usd), 0) FROM referrals WHERE referrer_id = ?`, userID)
+	var stats ReferralStats
+	if err := row.Scan(&stats.TotalReferrals, &stats.TotalEarningsUSD); err != nil {
+		return nil, err
+	}
+	return &stats, nil
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
