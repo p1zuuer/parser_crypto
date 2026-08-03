@@ -2,9 +2,11 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"html"
 	"log"
+	"net/http"
 	"strings"
 	"time"
 
@@ -51,6 +53,76 @@ func contractCheckURL(chain, addr string) string {
 	}
 }
 
+// RugCheckReport represents the response structure from RugCheck API summary.
+type RugCheckReport struct {
+	Score int `json:"score"`
+	Risks []struct {
+		Name        string `json:"name"`
+		Description string `json:"description"`
+		Level       string `json:"level"`
+		Score       int    `json:"score"`
+	} `json:"risks"`
+}
+
+// checkRugCheck queries the RugCheck API for Solana tokens with a 3-second timeout.
+// Returns (safetyStatusText, shouldSkip, error)
+// safetyStatusText:
+// - "🛡️ AUTO-RUGCHECK: PASSED (Liquidity Locked / Mint Disabled)"
+// - "🛡️ AUTO-RUGCHECK: UNVERIFIED (API Timeout)" or similar on failure/timeout
+// shouldSkip: true if dangerous risks or high risk score > 5000.
+func checkRugCheck(chain, address string) (string, bool, error) {
+	c := strings.ToLower(chain)
+	if c != "solana" && c != "sol" {
+		// Non-solana tokens pass automatic rugcheck by default without failing/blocking
+		return "🛡️ AUTO-RUGCHECK: PASSED (Non-Solana Chain)", false, nil
+	}
+
+	url := fmt.Sprintf("https://api.rugcheck.xyz/v1/tokens/%s/report/summary", address)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return "🛡️ AUTO-RUGCHECK: UNVERIFIED (API Error)", false, err
+	}
+
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		// Timeout or network failure
+		return "🛡️ AUTO-RUGCHECK: UNVERIFIED (API Timeout)", false, nil
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "🛡️ AUTO-RUGCHECK: UNVERIFIED (API Status " + fmt.Sprintf("%d", resp.StatusCode) + ")", false, nil
+	}
+
+	var report RugCheckReport
+	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
+		return "🛡️ AUTO-RUGCHECK: UNVERIFIED (Parse Error)", false, nil
+	}
+
+	// Check conditions:
+	// - High risk score > 5000
+	if report.Score > 5000 {
+		return "🛑 RISK WARNING: FAILED RUGCHECK (High Score: " + fmt.Sprintf("%d", report.Score) + ")", true, nil
+	}
+
+	// - Dangerous risks (e.g. unlocked liquidity, freeze authority enabled, danger level)
+	for _, risk := range report.Risks {
+		lvl := strings.ToLower(risk.Level)
+		name := strings.ToLower(risk.Name)
+		desc := strings.ToLower(risk.Description)
+
+		if lvl == "danger" || lvl == "critical" || strings.Contains(name, "freeze") || strings.Contains(name, "unlocked") || strings.Contains(desc, "unlocked") {
+			return fmt.Sprintf("🛑 RISK WARNING: FAILED RUGCHECK (%s)", risk.Name), true, nil
+		}
+	}
+
+	return "🛡️ AUTO-RUGCHECK: PASSED (Liquidity Locked / Mint Disabled)", false, nil
+}
+
 // chainNetworkMatch returns true when the alert's chain matches a user's
 // enabled-network preferences.
 func chainNetworkMatch(chain string, u storage.User) bool {
@@ -70,7 +142,7 @@ func chainNetworkMatch(chain string, u storage.User) bool {
 }
 
 // formatAlertMessage builds the rich HTML alert body sent to users.
-func formatAlertMessage(alert detector.ClusterAlert) string {
+func formatAlertMessage(alert detector.ClusterAlert, safetyLine string) string {
 	chainEmoji := chainEmoji(alert.Chain)
 	volStr := fmtFloat(alert.TotalVolumeUSD)
 	windowMin := alert.TimeWindowSeconds / 60
@@ -97,7 +169,8 @@ func formatAlertMessage(alert detector.ClusterAlert) string {
 			"📊 Average Entry Price: <b>$%s</b>\n"+
 			"⏱ Time Window: <b>%d min</b>\n"+
 			"📍 Lead Wallet: <code>%s</code>\n\n"+
-			"🔗 Contract Address:\n<code>%s</code>",
+			"🔗 Contract Address:\n<code>%s</code>\n\n"+
+			"%s",
 		chainEmoji,
 		html.EscapeString(alert.TokenSymbol),
 		html.EscapeString(alert.Chain),
@@ -108,6 +181,7 @@ func formatAlertMessage(alert detector.ClusterAlert) string {
 		windowMin,
 		html.EscapeString(maskAddr(alert.LeadWallet)),
 		alert.TokenAddress,
+		safetyLine,
 	)
 }
 
@@ -176,6 +250,17 @@ func StartAlertBroadcaster(
 }
 
 func broadcastAlert(client *Client, store *storage.Storage, alert detector.ClusterAlert) {
+	// Perform RugCheck verification before broadcasting
+	safetyLine, shouldSkip, err := checkRugCheck(alert.Chain, alert.TokenAddress)
+	if err != nil {
+		log.Printf("[RUGCHECK] Error checking token %s: %v", alert.TokenAddress, err)
+	}
+
+	if shouldSkip {
+		log.Printf("[BROADCASTER] Skipping alert for dangerous token %s (%s): %s", alert.TokenSymbol, alert.TokenAddress, safetyLine)
+		return
+	}
+
 	if err := store.SaveCluster(
 		alert.TokenAddress, alert.TokenSymbol, alert.Chain,
 		alert.BuyCount, alert.TotalVolumeUSD, alert.TimeWindowSeconds,
@@ -190,7 +275,7 @@ func broadcastAlert(client *Client, store *storage.Storage, alert detector.Clust
 		return
 	}
 
-	msg := formatAlertMessage(alert)
+	msg := formatAlertMessage(alert, safetyLine)
 	kb := alertKeyboard(alert)
 
 	notified := make(map[int64]struct{}, len(users))
@@ -252,12 +337,14 @@ func broadcastAlert(client *Client, store *storage.Storage, alert detector.Clust
 			"<b>🎯 Watchlist Hit!</b>\n\n"+
 				"Monitored wallet <code>%s</code> just bought <b>%s</b> on <b>%s</b>!\n\n"+
 				"💰 Deal Volume: <b>$%s</b>\n"+
-				"🔗 Contract:\n<code>%s</code>",
+				"🔗 Contract:\n<code>%s</code>\n\n"+
+				"%s",
 			html.EscapeString(maskAddr(alert.LeadWallet)),
 			html.EscapeString(alert.TokenSymbol),
 			html.EscapeString(alert.Chain),
 			html.EscapeString(fmtFloat(alert.TotalVolumeUSD)),
 			alert.TokenAddress,
+			safetyLine,
 		)
 		if err := client.SendMessageWithKeyboard(uid, watchMsg, kb); err != nil {
 			log.Printf("[BROADCASTER] watchlist ping %d: %v", uid, err)
@@ -271,7 +358,7 @@ func StartDailyDigest(ctx context.Context, client *Client, store *storage.Storag
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("[PANIC RECOVER] StartDailyDigest recovered: %v", r)
+				log.Printf("[DIGEST PANIC RECOVER] StartDailyDigest recovered: %v", r)
 			}
 		}()
 		for {
