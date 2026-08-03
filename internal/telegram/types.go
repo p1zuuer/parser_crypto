@@ -11,10 +11,19 @@ type Update struct {
 
 // Message is a Telegram message received from a user.
 type Message struct {
-	MessageID int    `json:"message_id"`
-	From      *User  `json:"from,omitempty"`
-	Chat      Chat   `json:"chat"`
-	Text      string `json:"text,omitempty"`
+	MessageID         int                `json:"message_id"`
+	From              *User              `json:"from,omitempty"`
+	Chat              Chat               `json:"chat"`
+	Text              string             `json:"text,omitempty"`
+	SuccessfulPayment *SuccessfulPayment `json:"successful_payment,omitempty"`
+}
+
+// SuccessfulPayment contains data about a successful payment.
+type SuccessfulPayment struct {
+	Currency                string `json:"currency"`
+	TotalAmount             int    `json:"total_amount"`
+	InvoicePayload          string `json:"invoice_payload"`
+	TelegramPaymentChargeID string `json:"telegram_payment_charge_id"`
 }
 
 // CallbackQuery is fired when a user taps an inline keyboard button.

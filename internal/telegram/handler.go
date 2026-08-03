@@ -17,8 +17,8 @@ import (
 	"smart-cluster-bot/internal/storage"
 )
 
-// WebhookHandler is an http.Handler that receives Telegram webhook updates,
-// immediately returns 200 OK, then processes the update asynchronously.
+// WebhookHandler receives Telegram webhook updates, returns 200 OK immediately,
+// then processes the update asynchronously in a goroutine.
 type WebhookHandler struct {
 	client  *Client
 	storage *storage.Storage
@@ -26,41 +26,95 @@ type WebhookHandler struct {
 	i18n    *i18n.Bundle
 }
 
-// NewWebhookHandler wires dependencies together.
 func NewWebhookHandler(client *Client, store *storage.Storage, cfg *config.Config, bundle *i18n.Bundle) *WebhookHandler {
-	return &WebhookHandler{
-		client:  client,
-		storage: store,
-		config:  cfg,
-		i18n:    bundle,
-	}
+	return &WebhookHandler{client: client, storage: store, config: cfg, i18n: bundle}
 }
 
-// ServeHTTP implements http.Handler.
 func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		return
 	}
-
 	var update Update
 	if err := json.NewDecoder(r.Body).Decode(&update); err != nil {
 		log.Printf("[WEBHOOK] decode error: %v", err)
 		http.Error(w, "Bad Request", http.StatusBadRequest)
 		return
 	}
-
 	w.WriteHeader(http.StatusOK)
 	go h.dispatch(&update)
 }
 
-// dispatch routes an update to the correct handler based on its type.
 func (h *WebhookHandler) dispatch(u *Update) {
 	switch {
 	case u.CallbackQuery != nil:
 		h.handleCallback(u.CallbackQuery)
+	case u.Message != nil && u.Message.From != nil && u.Message.SuccessfulPayment != nil:
+		h.handleSuccessfulPayment(u.Message)
 	case u.Message != nil && u.Message.From != nil:
 		h.handleMessage(u.Message)
+	}
+}
+
+// ── Successful Payment (Telegram Stars) ───────────────────────────────────────
+// Telegram sends a Message with SuccessfulPayment populated (not a separate
+// update type) after the user completes a Stars invoice.
+
+func (h *WebhookHandler) handleSuccessfulPayment(msg *Message) {
+	userID := msg.From.ID
+	chatID := msg.Chat.ID
+	sp := msg.SuccessfulPayment
+
+	// Guard: only honour Stars (XTR) payments for our VIP product.
+	if sp == nil || sp.Currency != "XTR" || sp.InvoicePayload != "vip_stars_30d" {
+		log.Printf("[PAYMENT] unexpected payment ignored: currency=%s payload=%s", sp.Currency, sp.InvoicePayload)
+		return
+	}
+
+	if err := h.storage.SetUserVIP(userID, true); err != nil {
+		log.Printf("[PAYMENT] SetUserVIP %d: %v", userID, err)
+		h.client.SendMessage(chatID, "⚠️ Payment received but VIP activation failed. Contact @StarkWonder.")
+		return
+	}
+
+	bootstrapLang := "en"
+	if strings.HasPrefix(strings.ToLower(msg.From.LanguageCode), "ru") {
+		bootstrapLang = "ru"
+	}
+	user, _ := h.storage.GetOrCreateUser(userID, msg.From.Username, bootstrapLang)
+	lang := bootstrapLang
+	if user != nil {
+		lang = user.Language
+	}
+
+	log.Printf("[PAYMENT] Stars VIP activated for user %d", userID)
+	h.sendVIPActivatedMessage(chatID, lang)
+}
+
+// sendVIPActivatedMessage is shared by both Stars and CryptoBot flows.
+func (h *WebhookHandler) sendVIPActivatedMessage(chatID int64, lang string) {
+	var body string
+	if lang == "ru" {
+		body = "👑 <b>VIP АКТИВИРОВАН</b>\n" +
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			"<code>> ACCESS_LEVEL: VIP\n" +
+			"> MASK: DISABLED\n" +
+			"> ALERTS: UNLIMITED\n" +
+			"> STATUS: ACTIVE [30d]</code>\n\n" +
+			"Добро пожаловать в элиту 🔥\n" +
+			"Все адреса кошельков теперь полностью открыты."
+	} else {
+		body = "👑 <b>VIP ACTIVATED</b>\n" +
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			"<code>> ACCESS_LEVEL: VIP\n" +
+			"> MASK: DISABLED\n" +
+			"> ALERTS: UNLIMITED\n" +
+			"> STATUS: ACTIVE [30d]</code>\n\n" +
+			"Welcome to the elite 🔥\n" +
+			"All wallet addresses are now fully unmasked."
+	}
+	if err := h.client.SendMessageWithKeyboard(chatID, body, backToMenuKB(lang)); err != nil {
+		log.Printf("[PAYMENT] sendVIPActivatedMessage %d: %v", chatID, err)
 	}
 }
 
@@ -81,87 +135,49 @@ func (h *WebhookHandler) handleMessage(msg *Message) {
 
 	text := strings.TrimSpace(msg.Text)
 
-	// Gatekeeper: ToS must be accepted before anything works.
 	if !user.TosAccepted {
 		h.sendTosDisclaimer(chatID, user.Language)
-		return
-	}
-
-	// Deep-link referral: /start ref_<referrerID>
-	if strings.HasPrefix(text, "/start ref_") {
-		parts := strings.SplitN(text, " ", 2)
-		if len(parts) == 2 {
-			h.handleReferral(from.ID, parts[1])
-		}
-		h.sendStartMenu(chatID, from.FirstName, user)
 		return
 	}
 
 	switch {
 	case text == "/start":
 		h.sendStartMenu(chatID, from.FirstName, user)
-
 	case text == "/manual" || text == "/help":
 		h.sendManual(chatID, user.Language)
-
-	case strings.HasPrefix(text, "/watch"):
+	case strings.HasPrefix(text, "/watch ") || text == "/watch":
 		h.handleWatchCommand(chatID, from.ID, text, user.Language)
-
 	case text == "/watchlist":
 		h.sendWatchlistMenu(chatID, from.ID, user.Language)
-
 	case text == "/stats":
 		h.sendStats24h(chatID, user.Language)
-
 	case text == "/hot":
 		h.sendHotWallets(chatID, user.Language)
-
 	case text == "/vip":
 		h.sendVIPMenu(chatID, user.Language)
-
-	case text == "/ref" || text == "/referral":
-		h.sendReferralMenu(chatID, from.ID, user.Language)
-
 	default:
 		h.sendStartMenu(chatID, from.FirstName, user)
 	}
 }
 
-// handleReferral credits a referrer when a new user arrives via their link.
-// It is a no-op if the referrer is the same as the new user.
-func (h *WebhookHandler) handleReferral(newUserID int64, payload string) {
-	if !strings.HasPrefix(payload, "ref_") {
-		return
-	}
-	referrerID, err := strconv.ParseInt(strings.TrimPrefix(payload, "ref_"), 10, 64)
-	if err != nil || referrerID == newUserID {
-		return
-	}
-	if err := h.storage.AddReferral(referrerID, newUserID); err != nil {
-		log.Printf("[HANDLER] AddReferral %d→%d: %v", referrerID, newUserID, err)
-	}
-}
-
-// ── ToS Disclaimer ─────────────────────────────────────────────────────────────
+// ── ToS ────────────────────────────────────────────────────────────────────────
 
 func (h *WebhookHandler) sendTosDisclaimer(chatID int64, lang string) {
-	msg := "⚠️ <b>Внимание!</b> Smart Cluster Terminal — это исключительно аналитический инструмент для отслеживания публичных транзакций в блокчейне. Бот НЕ дает финансовых советов (Not Financial Advice) и НЕ является призывом к инвестициям. Рынок криптовалют несет сверхвысокие риски полной потери средств. Создатели бота не несут никакой ответственности за ваши торговые решения и финансовые потери. Вы используете сервис на свой страх и риск. Подтверждая, вы соглашаетесь с условиями и подтверждаете, что вам есть 18 лет."
+	msg := "⚠️ <b>Внимание!</b> Smart Cluster Terminal — исключительно аналитический инструмент. Бот НЕ даёт финансовых советов и НЕ является призывом к инвестициям. Рынок криптовалют несёт сверхвысокие риски. Подтверждая, вы соглашаетесь с условиями и подтверждаете, что вам есть 18 лет."
 	if lang == "en" {
-		msg = "⚠️ <b>Disclaimer!</b> Smart Cluster Terminal is an analytical tool only. It does NOT provide financial advice and is NOT an invitation to invest. Crypto markets carry extreme risk of total loss. The creators are not responsible for any trading decisions or financial losses. You use this service at your own risk. By confirming, you agree to the terms and confirm you are 18 or older."
+		msg = "⚠️ <b>Disclaimer!</b> Smart Cluster Terminal is an analytical tool only. It does NOT provide financial advice. Crypto markets carry extreme risk of total loss. By confirming, you agree to the terms and confirm you are 18 or older."
 	}
-
 	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: "✅ Я прочитал, принимаю риски и мне есть 18 лет", CallbackData: "accept_tos"}},
+			{{Text: "✅ Принимаю / I Accept", CallbackData: "accept_tos"}},
 		},
 	}
-
 	if err := h.client.SendMessageWithKeyboard(chatID, msg, kb); err != nil {
 		log.Printf("[HANDLER] sendTosDisclaimer %d: %v", chatID, err)
 	}
 }
 
-// ── /start menu (text-only, edit-in-place friendly) ────────────────────────────
+// ── Start menu ─────────────────────────────────────────────────────────────────
 
 func (h *WebhookHandler) sendStartMenu(chatID int64, firstName string, user *storage.User) {
 	body := h.buildStartMenuText(firstName, user)
@@ -171,15 +187,11 @@ func (h *WebhookHandler) sendStartMenu(chatID int64, firstName string, user *sto
 	}
 }
 
-// editStartMenu morphs an existing message bubble in-place back to the main menu.
-// This is the ONLY correct implementation for "Back" navigation — no new messages.
 func (h *WebhookHandler) editStartMenu(chatID int64, msgID int, firstName string, user *storage.User) {
 	body := h.buildStartMenuText(firstName, user)
 	kb := h.buildStartMenuKB(user.Language)
 	if err := h.client.EditMessageText(chatID, msgID, body, kb); err != nil {
-		log.Printf("[HANDLER] editStartMenu %d/%d: %v", chatID, msgID, err)
-		// Fallback: if the original message cannot be edited (e.g. it was a photo),
-		// delete the stale bubble and send a fresh one.
+		log.Printf("[HANDLER] editStartMenu fallback %d/%d: %v", chatID, msgID, err)
 		_ = h.client.DeleteMessage(chatID, msgID)
 		_ = h.client.SendMessageWithKeyboard(chatID, body, kb)
 	}
@@ -187,41 +199,46 @@ func (h *WebhookHandler) editStartMenu(chatID int64, msgID int, firstName string
 
 func (h *WebhookHandler) buildStartMenuText(firstName string, user *storage.User) string {
 	plan := "FREE"
+	planIcon := "⬜"
 	if user.IsVIP {
-		plan = "👑 VIP"
+		plan = "VIP"
+		planIcon = "👑"
 	}
 	lang := user.Language
+	nets := enabledNetworksRaw(user)
+	name := html.EscapeString(firstName)
+
 	if lang == "ru" {
 		return fmt.Sprintf(
-			"💎 <b>SMART CLUSTER TERMINAL</b>\n"+
-				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n"+
-				"👋 <b>Привет, %s!</b>\n\n"+
-				"📊 Аналитика и безопасность смарт-денег в реальном времени.\n\n"+
-				"👤 План: <b>%s</b>\n"+
-				"🔔 Мин. объём: <b>$%s</b>\n"+
-				"🌐 Сети: %s\n"+
-				"🌐 Язык: <b>Русский (RU)</b>\n\n"+
-				"Выберите действие:",
-			html.EscapeString(firstName),
-			html.EscapeString(plan),
-			fmtVolume(user.MinVolume),
-			enabledNetworks(user),
+			"⬛ <b>SMART CLUSTER TERMINAL v2.0</b>\n"+
+				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
+				"<code>> SYSTEM_BOOT........ [OK]\n"+
+				"> AUTH_USER......... %s\n"+
+				"> ACCESS_LEVEL...... %s %s\n"+
+				"> MIN_VOL_FILTER.... $%s\n"+
+				"> ACTIVE_CHAINS..... %s\n"+
+				"> LANG.............. RU\n"+
+				"──────────────────────\n"+
+				"[ 🟢 TERMINAL ONLINE ]</code>\n\n"+
+				"Выберите модуль:",
+			name, planIcon, plan,
+			fmtVolume(user.MinVolume), nets,
 		)
 	}
 	return fmt.Sprintf(
-		"💎 <b>SMART CLUSTER TERMINAL</b>\n"+
-			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n"+
-			"👋 <b>Hello, %s!</b>\n\n"+
-			"📊 Real-time Smart Money Analytics & Security.\n\n"+
-			"👤 Plan: <b>%s</b>\n"+
-			"🔔 Min Volume: <b>$%s</b>\n"+
-			"🌐 Networks: %s\n"+
-			"🌐 Language: <b>English (EN)</b>\n\n"+
-			"Choose an action:",
-		html.EscapeString(firstName),
-		html.EscapeString(plan),
-		fmtVolume(user.MinVolume),
-		enabledNetworks(user),
+		"⬛ <b>SMART CLUSTER TERMINAL v2.0</b>\n"+
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
+			"<code>> SYSTEM_BOOT........ [OK]\n"+
+			"> AUTH_USER......... %s\n"+
+			"> ACCESS_LEVEL...... %s %s\n"+
+			"> MIN_VOL_FILTER.... $%s\n"+
+			"> ACTIVE_CHAINS..... %s\n"+
+			"> LANG.............. EN\n"+
+			"──────────────────────\n"+
+			"[ 🟢 TERMINAL ONLINE ]</code>\n\n"+
+			"Select module:",
+		name, planIcon, plan,
+		fmtVolume(user.MinVolume), nets,
 	)
 }
 
@@ -236,7 +253,7 @@ func (h *WebhookHandler) buildStartMenuKB(lang string) *InlineKeyboardMarkup {
 				{Text: "📈 24h Stats", CallbackData: "cb:stats"},
 			},
 			{
-				{Text: tr(lang, "⭐ My Watchlist", "⭐ Мой Watchlist"), CallbackData: "cb:watchlist"},
+				{Text: tr(lang, "⭐ Watchlist", "⭐ Watchlist"), CallbackData: "cb:watchlist"},
 				{Text: tr(lang, "⚙️ Settings", "⚙️ Настройки"), CallbackData: "cb:settings"},
 			},
 			{
@@ -245,7 +262,6 @@ func (h *WebhookHandler) buildStartMenuKB(lang string) *InlineKeyboardMarkup {
 			},
 			{
 				{Text: tr(lang, "👑 VIP Pass", "👑 VIP Пасс"), CallbackData: "cb:vip"},
-				{Text: tr(lang, "🤝 Referral", "🤝 Рефералы"), CallbackData: "cb:referral"},
 			},
 		},
 	}
@@ -256,54 +272,42 @@ func (h *WebhookHandler) buildStartMenuKB(lang string) *InlineKeyboardMarkup {
 func (h *WebhookHandler) handleWatchCommand(chatID, userID int64, text, lang string) {
 	parts := strings.Fields(text)
 	if len(parts) < 2 {
+		hint := "ℹ️ Usage: <code>/watch &lt;address&gt; [note]</code>"
 		if lang == "ru" {
-			h.client.SendMessage(chatID,
-				"ℹ️ Использование: <code>/watch <wallet_address> [заметка]</code>\n\n"+
-					"Пример:\n<code>/watch 0xABCDEF... кит</code>")
-		} else {
-			h.client.SendMessage(chatID,
-				"ℹ️ Usage: <code>/watch <wallet_address> [optional note]</code>\n\n"+
-					"Example:\n<code>/watch 0xABCDEF... big whale</code>")
+			hint = "ℹ️ Использование: <code>/watch &lt;адрес&gt; [заметка]</code>"
 		}
+		h.client.SendMessage(chatID, hint)
 		return
 	}
 	addr := parts[1]
 	note := strings.Join(parts[2:], " ")
-
 	if err := h.storage.AddWatchlistWallet(userID, addr, note); err != nil {
 		log.Printf("[HANDLER] AddWatchlistWallet %d: %v", userID, err)
-		msg := "❌ Failed to add wallet. Please try again later."
+		msg := "❌ Failed to add wallet."
 		if lang == "ru" {
-			msg = "❌ Не удалось добавить кошелёк. Попробуйте позже."
+			msg = "❌ Не удалось добавить кошелёк."
 		}
 		h.client.SendMessage(chatID, msg)
 		return
 	}
-
 	var reply string
 	if lang == "ru" {
 		reply = fmt.Sprintf(
-			"✅ <b>Кошелёк добавлен в Watchlist!</b>\n\n"+
-				"<code>%s</code>\n"+
-				"📝 Заметка: %s\n\n"+
-				"Вы получите уведомление, как только этот кошелёк купит что-нибудь.",
-			html.EscapeString(addr),
-			html.EscapeString(or(note, "—")),
+			"✅ <b>Кошелёк добавлен в Watchlist</b>\n\n"+
+				"<code>%s</code>\n📝 %s",
+			html.EscapeString(addr), html.EscapeString(or(note, "—")),
 		)
 	} else {
 		reply = fmt.Sprintf(
-			"✅ <b>Wallet added to Watchlist!</b>\n\n"+
-				"<code>%s</code>\n"+
-				"📝 Note: %s\n\n"+
-				"You will receive an alert as soon as this wallet makes a purchase.",
-			html.EscapeString(addr),
-			html.EscapeString(or(note, "—")),
+			"✅ <b>Wallet added to Watchlist</b>\n\n"+
+				"<code>%s</code>\n📝 %s",
+			html.EscapeString(addr), html.EscapeString(or(note, "—")),
 		)
 	}
 	h.client.SendMessageWithKeyboard(chatID, reply, backToMenuKB(lang))
 }
 
-// ── Watchlist (send = new message from /command; edit = in-place from button) ──
+// ── Watchlist ──────────────────────────────────────────────────────────────────
 
 func (h *WebhookHandler) sendWatchlistMenu(chatID, userID int64, lang string) {
 	text, kb := h.buildWatchlistContent(userID, lang)
@@ -321,21 +325,16 @@ func (h *WebhookHandler) editWatchlistMenu(chatID int64, msgID int, userID int64
 
 func (h *WebhookHandler) buildWatchlistContent(userID int64, lang string) (string, *InlineKeyboardMarkup) {
 	entries, _ := h.storage.GetWatchlist(userID)
+	header := "⭐ <b>WATCHLIST</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"
 	if len(entries) == 0 {
-		msg := "⭐ <b>My Watchlist</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\nYour list is empty.\n\nAdd using: <code>/watch &lt;address&gt; [note]</code>"
+		empty := header + "No wallets tracked.\n\n<code>/watch &lt;address&gt; [note]</code>"
 		if lang == "ru" {
-			msg = "⭐ <b>Мой Watchlist</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\nСписок пуст.\n\nДобавьте командой: <code>/watch &lt;address&gt; [заметка]</code>"
+			empty = header + "Список пуст.\n\n<code>/watch &lt;адрес&gt; [заметка]</code>"
 		}
-		return msg, backToMenuKB(lang)
+		return empty, backToMenuKB(lang)
 	}
-
 	var sb strings.Builder
-	if lang == "ru" {
-		sb.WriteString("⭐ <b>Мой Watchlist</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n")
-	} else {
-		sb.WriteString("⭐ <b>My Watchlist</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n")
-	}
-
+	sb.WriteString(header)
 	var rows [][]InlineKeyboardButton
 	for _, e := range entries {
 		masked := maskAddr(e.WalletAddress)
@@ -344,13 +343,11 @@ func (h *WebhookHandler) buildWatchlistContent(userID int64, lang string) (strin
 			sb.WriteString(" — " + html.EscapeString(e.Note))
 		}
 		sb.WriteString("\n")
-		delText := "🗑 " + masked
 		rows = append(rows, []InlineKeyboardButton{
-			{Text: delText, CallbackData: fmt.Sprintf("cb:watchrm:%d", e.ID)},
+			{Text: "🗑 " + masked, CallbackData: fmt.Sprintf("cb:watchrm:%d", e.ID)},
 		})
 	}
-	backText := tr(lang, "⬅️ Back", "⬅️ Назад")
-	rows = append(rows, []InlineKeyboardButton{{Text: backText, CallbackData: "cb:menu"}})
+	rows = append(rows, []InlineKeyboardButton{{Text: tr(lang, "⬅️ Back", "⬅️ Назад"), CallbackData: "cb:menu"}})
 	return sb.String(), &InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
@@ -379,36 +376,46 @@ func (h *WebhookHandler) buildStats24hContent(lang string) (string, *InlineKeybo
 		}
 		return msg, backToMenuKB(lang)
 	}
+
+	topToken := html.EscapeString(or(stats.TopToken, "N/A"))
+	topChain := html.EscapeString(or(stats.TopChain, "N/A"))
+
 	var body string
 	if lang == "ru" {
-		body = fmt.Sprintf(
-			"📈 <b>Статистика за 24 часа</b>\n"+
-				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
-				"🔢 Кластеров обнаружено: <b>%d</b>\n"+
-				"💰 Общий объём: <b>$%s</b>\n"+
-				"🏆 Топ токен: <b>%s</b>\n"+
-				"🌐 Активная сеть: <b>%s</b>",
-			stats.TotalClusters, fmtFloat(stats.TotalVolumeUSD),
-			html.EscapeString(or(stats.TopToken, "—")),
-			html.EscapeString(or(stats.TopChain, "—")),
-		)
+		body = "📈 <b>СТАТИСТИКА — 24h СКАН</b>\n" +
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			fmt.Sprintf(
+				"<code>> CLUSTERS_FOUND..... %d\n"+
+					"> TOTAL_VOLUME...... $%s\n"+
+					"> TOP_TOKEN......... %s\n"+
+					"> TOP_CHAIN......... %s\n"+
+					"──────────────────────\n"+
+					"[ 🟢 SCAN COMPLETE ]</code>",
+				stats.TotalClusters,
+				fmtFloat(stats.TotalVolumeUSD),
+				topToken,
+				topChain,
+			)
 	} else {
-		body = fmt.Sprintf(
-			"📈 <b>24h Statistics</b>\n"+
-				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
-				"🔢 Clusters Detected: <b>%d</b>\n"+
-				"💰 Total Volume: <b>$%s</b>\n"+
-				"🏆 Top Token: <b>%s</b>\n"+
-				"🌐 Top Chain: <b>%s</b>",
-			stats.TotalClusters, fmtFloat(stats.TotalVolumeUSD),
-			html.EscapeString(or(stats.TopToken, "—")),
-			html.EscapeString(or(stats.TopChain, "—")),
-		)
+		body = "📈 <b>STATISTICS — 24h SCAN</b>\n" +
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			fmt.Sprintf(
+				"<code>> CLUSTERS_FOUND..... %d\n"+
+					"> TOTAL_VOLUME...... $%s\n"+
+					"> TOP_TOKEN......... %s\n"+
+					"> TOP_CHAIN......... %s\n"+
+					"──────────────────────\n"+
+					"[ 🟢 SCAN COMPLETE ]</code>",
+				stats.TotalClusters,
+				fmtFloat(stats.TotalVolumeUSD),
+				topToken,
+				topChain,
+			)
 	}
 	return body, backToMenuKB(lang)
 }
 
-// ── Hot wallets ─────────────────────────────────────────────────────────────────
+// ── Hot Wallets ────────────────────────────────────────────────────────────────
 
 func (h *WebhookHandler) sendHotWallets(chatID int64, lang string) {
 	text, kb := h.buildHotWalletsContent(lang)
@@ -426,19 +433,13 @@ func (h *WebhookHandler) editHotWallets(chatID int64, msgID int, lang string) {
 
 func (h *WebhookHandler) buildHotWalletsContent(lang string) (string, *InlineKeyboardMarkup) {
 	wallets, _ := h.storage.GetTopWallets(24, 5)
+	header := "🔥 <b>HOT WALLETS — 24h</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"
 	if len(wallets) == 0 {
-		msg := "🔥 <b>Hot Wallets</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\nNo data available yet."
-		if lang == "ru" {
-			msg = "🔥 <b>Горячие кошельки</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\nДанных пока нет."
-		}
+		msg := header + "<code>> NO_DATA_YET</code>"
 		return msg, backToMenuKB(lang)
 	}
 	var sb strings.Builder
-	if lang == "ru" {
-		sb.WriteString("🔥 <b>Горячие кошельки — 24h</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n<i>Кошельки, появляющиеся в наибольшем числе кластеров</i>\n\n")
-	} else {
-		sb.WriteString("🔥 <b>Hot Wallets — 24h</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n<i>Wallets appearing in the most clusters</i>\n\n")
-	}
+	sb.WriteString(header)
 	medals := []string{"🥇", "🥈", "🥉", "4️⃣", "5️⃣"}
 	for i, w := range wallets {
 		medal := "•"
@@ -446,7 +447,7 @@ func (h *WebhookHandler) buildHotWalletsContent(lang string) (string, *InlineKey
 			medal = medals[i]
 		}
 		sb.WriteString(fmt.Sprintf(
-			"%s <code>%s</code>\n   %d clusters · $%s\n\n",
+			"%s <code>%s</code>\n   <code>clusters: %d  vol: $%s</code>\n\n",
 			medal,
 			html.EscapeString(maskAddr(w.WalletAddress)),
 			w.ClusterCount,
@@ -454,7 +455,7 @@ func (h *WebhookHandler) buildHotWalletsContent(lang string) (string, *InlineKey
 		))
 	}
 	if lang == "ru" {
-		sb.WriteString("<i>Повторные покупки = наиболее убеждённые умные деньги</i>")
+		sb.WriteString("<i>Повторные покупки = наибольшая убеждённость</i>")
 	} else {
 		sb.WriteString("<i>Repeated buys = highest conviction smart money</i>")
 	}
@@ -465,27 +466,30 @@ func (h *WebhookHandler) buildHotWalletsContent(lang string) (string, *InlineKey
 
 func (h *WebhookHandler) editRecentClusters(chatID int64, msgID int, lang string) {
 	clusters, err := h.storage.GetRecentClusters(5)
+	var body string
+	header := "🔥 <b>FRESH CLUSTERS</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"
 	if err != nil || len(clusters) == 0 {
-		msg := "🔥 <b>Fresh Clusters</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\nNo data available yet."
+		body = header + "<code>> NO_DATA_YET</code>"
 		if lang == "ru" {
-			msg = "🔥 <b>Свежие кластеры</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\nДанных пока нет."
+			body = "🔥 <b>СВЕЖИЕ КЛАСТЕРЫ</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n<code>> NO_DATA_YET</code>"
 		}
-		if err := h.client.EditMessageText(chatID, msgID, msg, backToMenuKB(lang)); err != nil {
-			log.Printf("[HANDLER] editRecentClusters empty %d/%d: %v", chatID, msgID, err)
-		}
+		_ = h.client.EditMessageText(chatID, msgID, body, backToMenuKB(lang))
 		return
 	}
-	var sb strings.Builder
 	if lang == "ru" {
-		sb.WriteString("🔥 <b>Последние кластеры</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n")
-	} else {
-		sb.WriteString("🔥 <b>Recent Clusters</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n")
+		header = "🔥 <b>СВЕЖИЕ КЛАСТЕРЫ</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"
 	}
+	var sb strings.Builder
+	sb.WriteString(header)
 	for _, c := range clusters {
 		sb.WriteString(fmt.Sprintf(
-			"• <b>%s</b> (%s)\n  💰 $%s · %d buys\n  <code>%s</code>\n\n",
-			html.EscapeString(c.TokenSymbol), html.EscapeString(c.Chain),
-			fmtFloat(c.TotalVolumeUSD), c.BuyCount,
+			"• <b>%s</b> <code>[%s]</code>\n"+
+				"  <code>vol: $%s  buys: %d</code>\n"+
+				"  <code>%s</code>\n\n",
+			html.EscapeString(c.TokenSymbol),
+			html.EscapeString(c.Chain),
+			fmtFloat(c.TotalVolumeUSD),
+			c.BuyCount,
 			c.TokenAddress,
 		))
 	}
@@ -506,7 +510,6 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 	userID := cb.From.ID
 	data := cb.Data
 
-	// Always answer immediately to stop the spinner, log failures.
 	if err := h.client.AnswerCallbackQuery(cb.ID, ""); err != nil {
 		log.Printf("[HANDLER] AnswerCallbackQuery %s: %v", cb.ID, err)
 	}
@@ -520,13 +523,12 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 		log.Printf("[HANDLER] GetOrCreateUser callback %d: %v", userID, err)
 		return
 	}
-	currentLang := user.Language
+	lang := user.Language
 
 	switch {
 	case data == "accept_tos":
 		_ = h.storage.SetUserTosAccepted(userID, true)
 		user.TosAccepted = true
-		// ToS message has no keyboard to morph — delete it, send fresh start menu.
 		_ = h.client.DeleteMessage(chatID, msgID)
 		h.sendStartMenu(chatID, cb.From.FirstName, user)
 
@@ -534,43 +536,35 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 		h.editStartMenu(chatID, msgID, cb.From.FirstName, user)
 
 	case data == "cb:clusters":
-		h.editRecentClusters(chatID, msgID, currentLang)
+		h.editRecentClusters(chatID, msgID, lang)
 
 	case data == "cb:stats":
-		h.editStats24h(chatID, msgID, currentLang)
+		h.editStats24h(chatID, msgID, lang)
 
 	case data == "cb:watchlist":
-		h.editWatchlistMenu(chatID, msgID, userID, currentLang)
+		h.editWatchlistMenu(chatID, msgID, userID, lang)
 
 	case data == "cb:hot":
-		h.editHotWallets(chatID, msgID, currentLang)
+		h.editHotWallets(chatID, msgID, lang)
 
 	case data == "cb:settings":
 		h.editSettingsMenu(chatID, msgID, userID, user)
 
-	// ── VIP & Help — these call EditMessageText directly (not smartEdit).
-	// They work correctly as long as the source message is a TEXT message,
-	// which it now always is since sendStartMenu no longer uses SendPhoto.
 	case data == "cb:vip":
-		h.editVIPInfo(chatID, msgID, currentLang)
+		h.editVIPInfo(chatID, msgID, lang)
 
 	case data == "cb:help":
-		h.editHelp(chatID, msgID, currentLang)
-
-	case data == "cb:referral":
-		h.editReferralMenu(chatID, msgID, userID, currentLang)
+		h.editHelp(chatID, msgID, lang)
 
 	case data == "pay:stars":
-		h.editPaymentStars(chatID, msgID, currentLang)
+		h.editPaymentStars(chatID, msgID, lang)
 
 	case data == "pay:cryptobot":
-		h.editPaymentCryptoBot(chatID, msgID, currentLang)
+		h.editPaymentCryptoBot(chatID, msgID, userID, lang)
 
-	case data == "pay:wallet":
-		h.editPaymentDirectWallet(chatID, msgID, currentLang)
-
-	case strings.HasPrefix(data, "pay:done:"):
-		h.handleDirectPaymentSubmitted(chatID, msgID, userID, data, currentLang)
+	// CryptoBot payment check: "pay:cbcheck:<invoiceID>"
+	case strings.HasPrefix(data, "pay:cbcheck:"):
+		h.handleCryptoBotCheck(chatID, msgID, userID, data, lang)
 
 	case data == "cb:lang":
 		newLang := "ru"
@@ -582,53 +576,58 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 		h.editSettingsMenu(chatID, msgID, userID, user)
 
 	case strings.HasPrefix(data, "cb:vol:"):
-		h.handleVolumeChange(chatID, msgID, userID, cb.From.Username, currentLang, data)
+		h.handleVolumeChange(chatID, msgID, userID, cb.From.Username, lang, data)
 
 	case strings.HasPrefix(data, "cb:net:"):
-		h.handleNetworkToggle(chatID, msgID, userID, cb.From.Username, currentLang, data)
+		h.handleNetworkToggle(chatID, msgID, userID, cb.From.Username, lang, data)
 
 	case strings.HasPrefix(data, "cb:watchrm:"):
-		h.handleWatchlistRemove(chatID, msgID, userID, data, currentLang)
+		h.handleWatchlistRemove(chatID, msgID, userID, data, lang)
 	}
 }
 
-// ── Settings menu ──────────────────────────────────────────────────────────────
+// ── Settings ───────────────────────────────────────────────────────────────────
 
 func (h *WebhookHandler) editSettingsMenu(chatID int64, msgID int, userID int64, user *storage.User) {
 	lang := user.Language
+	langLabel := "EN"
+	if lang == "ru" {
+		langLabel = "RU"
+	}
+
 	var body string
 	if lang == "ru" {
-		body = fmt.Sprintf(
-			"⚙️ <b>Настройки алертов</b>\n"+
-				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
-				"Текущий мин. объём: <b>$%s</b>\n"+
-				"Активные сети: %s\n"+
-				"Язык: <b>Русский (RU)</b>\n\n"+
-				"Изменения сохраняются мгновенно.",
-			fmtVolume(user.MinVolume), enabledNetworks(user),
-		)
+		body = "⚙️ <b>НАСТРОЙКИ</b>\n" +
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			fmt.Sprintf(
+				"<code>> MIN_VOL_FILTER.... $%s\n"+
+					"> ACTIVE_CHAINS..... %s\n"+
+					"> LANG.............. %s\n"+
+					"──────────────────────\n"+
+					"[ 🔧 CONFIG MODE ]</code>",
+				fmtVolume(user.MinVolume),
+				enabledNetworksRaw(user),
+				langLabel,
+			)
 	} else {
-		body = fmt.Sprintf(
-			"⚙️ <b>Alert Settings</b>\n"+
-				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
-				"Current Min Volume: <b>$%s</b>\n"+
-				"Active Networks: %s\n"+
-				"Language: <b>English (EN)</b>\n\n"+
-				"Changes are saved instantly.",
-			fmtVolume(user.MinVolume), enabledNetworks(user),
-		)
+		body = "⚙️ <b>SETTINGS</b>\n" +
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			fmt.Sprintf(
+				"<code>> MIN_VOL_FILTER.... $%s\n"+
+					"> ACTIVE_CHAINS..... %s\n"+
+					"> LANG.............. %s\n"+
+					"──────────────────────\n"+
+					"[ 🔧 CONFIG MODE ]</code>",
+				fmtVolume(user.MinVolume),
+				enabledNetworksRaw(user),
+				langLabel,
+			)
 	}
 
-	checkETH := emojiCheck(user.EthEnabled)
-	checkSOL := emojiCheck(user.SolEnabled)
-	checkBASE := emojiCheck(user.BaseEnabled)
-	checkBSC := emojiCheck(user.BscEnabled)
-
-	langToggleText := "🌐 Language: English (EN)"
+	langToggle := "🌐 Switch → RU"
 	if lang == "ru" {
-		langToggleText = "🌐 Язык / Language: Русский (RU)"
+		langToggle = "🌐 Switch → EN"
 	}
-	backText := tr(lang, "⬅️ Back", "⬅️ Назад")
 
 	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
@@ -639,13 +638,13 @@ func (h *WebhookHandler) editSettingsMenu(chatID int64, msgID int, userID int64,
 				{Text: "$100k", CallbackData: fmt.Sprintf("cb:vol:%d:100000", userID)},
 			},
 			{
-				{Text: checkETH + " ETH", CallbackData: fmt.Sprintf("cb:net:%d:eth", userID)},
-				{Text: checkSOL + " SOL", CallbackData: fmt.Sprintf("cb:net:%d:sol", userID)},
-				{Text: checkBASE + " BASE", CallbackData: fmt.Sprintf("cb:net:%d:base", userID)},
-				{Text: checkBSC + " BSC", CallbackData: fmt.Sprintf("cb:net:%d:bsc", userID)},
+				{Text: emojiCheck(user.EthEnabled) + " ETH", CallbackData: fmt.Sprintf("cb:net:%d:eth", userID)},
+				{Text: emojiCheck(user.SolEnabled) + " SOL", CallbackData: fmt.Sprintf("cb:net:%d:sol", userID)},
+				{Text: emojiCheck(user.BaseEnabled) + " BASE", CallbackData: fmt.Sprintf("cb:net:%d:base", userID)},
+				{Text: emojiCheck(user.BscEnabled) + " BSC", CallbackData: fmt.Sprintf("cb:net:%d:bsc", userID)},
 			},
-			{{Text: langToggleText, CallbackData: "cb:lang"}},
-			{{Text: backText, CallbackData: "cb:menu"}},
+			{{Text: langToggle, CallbackData: "cb:lang"}},
+			{{Text: tr(lang, "⬅️ Back", "⬅️ Назад"), CallbackData: "cb:menu"}},
 		},
 	}
 	if err := h.client.EditMessageText(chatID, msgID, body, kb); err != nil {
@@ -679,12 +678,11 @@ func (h *WebhookHandler) handleNetworkToggle(chatID int64, msgID int, userID int
 	if len(parts) < 4 {
 		return
 	}
-	net := parts[3]
 	user, err := h.storage.GetOrCreateUser(userID, username, lang)
 	if err != nil {
 		return
 	}
-	switch net {
+	switch parts[3] {
 	case "eth":
 		user.EthEnabled = !user.EthEnabled
 	case "sol":
@@ -714,89 +712,95 @@ func (h *WebhookHandler) handleWatchlistRemove(chatID int64, msgID int, userID i
 	h.editWatchlistMenu(chatID, msgID, userID, lang)
 }
 
-// ── VIP Info & Payment flows ───────────────────────────────────────────────────
+// ── VIP Info ───────────────────────────────────────────────────────────────────
 
-// editVIPInfo shows the redesigned VIP page with three payment method buttons.
-// This is reached via cb:vip callback (edit-in-place).
 func (h *WebhookHandler) editVIPInfo(chatID int64, msgID int, lang string) {
-	body := h.buildVIPInfoText(lang)
-	kb := h.buildVIPInfoKB(lang)
+	body, kb := h.buildVIPContent(lang)
 	if err := h.client.EditMessageText(chatID, msgID, body, kb); err != nil {
 		log.Printf("[HANDLER] editVIPInfo %d/%d: %v", chatID, msgID, err)
 	}
 }
 
-// sendVIPMenu is used for the /vip text command — sends a new message.
 func (h *WebhookHandler) sendVIPMenu(chatID int64, lang string) {
-	body := h.buildVIPInfoText(lang)
-	kb := h.buildVIPInfoKB(lang)
+	body, kb := h.buildVIPContent(lang)
 	if err := h.client.SendMessageWithKeyboard(chatID, body, kb); err != nil {
 		log.Printf("[HANDLER] sendVIPMenu %d: %v", chatID, err)
 	}
 }
 
-func (h *WebhookHandler) buildVIPInfoText(lang string) string {
+func (h *WebhookHandler) buildVIPContent(lang string) (string, *InlineKeyboardMarkup) {
+	var body string
 	if lang == "ru" {
-		return "👑 <b>VIP Пасс — Smart Cluster Terminal</b>\n" +
+		body = "👑 <b>VIP ACCESS — SMART CLUSTER TERMINAL</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"<b>Что входит в VIP:</b>\n" +
-			"🔓 100% адресов всех кошельков без маскировки\n" +
-			"⚡ Мгновенные Telegram алерты без задержек\n" +
-			"🎯 Кастомные фильтры по токену и объёму\n" +
-			"📈 Полный архив кластеров + экспорт CSV\n" +
-			"🔥 Персональный топ горячих кошельков\n\n" +
-			"💳 <b>Стоимость: $9.99 / 30 дней</b>\n" +
-			"Выберите удобный способ оплаты:"
+			"<code>> MASK.............. DISABLED\n" +
+			"> ALERTS............ UNLIMITED\n" +
+			"> ARCHIVE........... FULL\n" +
+			"> EXPORT............ CSV_ON\n" +
+			"> HOT_WALLETS....... PRIORITY\n" +
+			"──────────────────────\n" +
+			"[ 💳 PRICE: $9.99 / 30d ]</code>\n\n" +
+			"Выберите способ оплаты:"
+	} else {
+		body = "👑 <b>VIP ACCESS — SMART CLUSTER TERMINAL</b>\n" +
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
+			"<code>> MASK.............. DISABLED\n" +
+			"> ALERTS............ UNLIMITED\n" +
+			"> ARCHIVE........... FULL\n" +
+			"> EXPORT............ CSV_ON\n" +
+			"> HOT_WALLETS....... PRIORITY\n" +
+			"──────────────────────\n" +
+			"[ 💳 PRICE: $9.99 / 30d ]</code>\n\n" +
+			"Select payment method:"
 	}
-	return "👑 <b>VIP Pass — Smart Cluster Terminal</b>\n" +
-		"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-		"<b>What's included:</b>\n" +
-		"🔓 100% unmasked wallet addresses\n" +
-		"⚡ Instant Telegram alerts with zero delay\n" +
-		"🎯 Custom token & volume filters\n" +
-		"📈 Full cluster history + CSV export\n" +
-		"🔥 Personalized hot wallet rankings\n\n" +
-		"💳 <b>Price: $9.99 / 30 days</b>\n" +
-		"Choose your payment method:"
-}
-
-func (h *WebhookHandler) buildVIPInfoKB(lang string) *InlineKeyboardMarkup {
-	backText := tr(lang, "⬅️ Back", "⬅️ Назад")
-	return &InlineKeyboardMarkup{
+	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
 			{{Text: "⭐ Telegram Stars (XTR)", CallbackData: "pay:stars"}},
 			{{Text: "🤖 CryptoBot — USDT / TON", CallbackData: "pay:cryptobot"}},
-			{{Text: "💎 Direct Crypto (TRC20 / SOL)", CallbackData: "pay:wallet"}},
-			{{Text: backText, CallbackData: "cb:menu"}},
+			{{Text: tr(lang, "⬅️ Back", "⬅️ Назад"), CallbackData: "cb:menu"}},
 		},
 	}
+	return body, kb
 }
 
 // ── Payment: Telegram Stars ────────────────────────────────────────────────────
+// Stars use Telegram's native invoice flow. We send an invoice link.
+// Telegram delivers a SuccessfulPayment message to our webhook when paid —
+// handled in handleSuccessfulPayment above.
 
 func (h *WebhookHandler) editPaymentStars(chatID int64, msgID int, lang string) {
 	var body string
 	if lang == "ru" {
-		body = "⭐ <b>Оплата через Telegram Stars (XTR)</b>\n" +
+		body = "⭐ <b>ОПЛАТА — TELEGRAM STARS</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"Получите 30 дней VIP-доступа мгновенно через официальную валюту Telegram Stars.\n\n" +
-			"Стоимость: <b>250 XTR</b>\n\n" +
-			"После оплаты Stars VIP активируется автоматически в течение нескольких минут."
+			"<code>> METHOD......... STARS (XTR)\n" +
+			"> AMOUNT......... 250 XTR\n" +
+			"> DURATION....... 30 DAYS\n" +
+			"> AUTO_ACTIVATE.. YES\n" +
+			"──────────────────────\n" +
+			"[ ⚡ INSTANT ACTIVATION ]</code>\n\n" +
+			"После оплаты VIP активируется автоматически."
 	} else {
-		body = "⭐ <b>Telegram Stars Payment (XTR)</b>\n" +
+		body = "⭐ <b>PAYMENT — TELEGRAM STARS</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"Get 30 days VIP access instantly via official Telegram Stars.\n\n" +
-			"Price: <b>250 XTR</b>\n\n" +
-			"VIP activates automatically within minutes after Stars payment."
+			"<code>> METHOD......... STARS (XTR)\n" +
+			"> AMOUNT......... 250 XTR\n" +
+			"> DURATION....... 30 DAYS\n" +
+			"> AUTO_ACTIVATE.. YES\n" +
+			"──────────────────────\n" +
+			"[ ⚡ INSTANT ACTIVATION ]</code>\n\n" +
+			"VIP activates automatically after payment."
 	}
 
-	payBtn := tr(lang, "⭐ Pay 250 Stars", "⭐ Оплатить 250 Stars")
-	backText := tr(lang, "⬅️ Back", "⬅️ Назад")
-
+	// The Stars invoice URL must be generated by calling sendInvoice via the
+	// Telegram Bot API. Until you wire that up, this link opens @StarkWonder
+	// for manual Stars transfer. Replace with your sendInvoice call when ready.
+	// The invoice payload "vip_stars_30d" is what handleSuccessfulPayment checks.
 	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: payBtn, URL: "https://t.me/StarkWonder?start=stars_vip"}},
-			{{Text: backText, CallbackData: "cb:vip"}},
+			{{Text: tr(lang, "⭐ Pay 250 Stars", "⭐ Оплатить 250 Stars"),
+				URL: "https://t.me/StarkWonder?start=stars_vip"}},
+			{{Text: tr(lang, "⬅️ Back", "⬅️ Назад"), CallbackData: "cb:vip"}},
 		},
 	}
 	if err := h.client.EditMessageText(chatID, msgID, body, kb); err != nil {
@@ -804,52 +808,66 @@ func (h *WebhookHandler) editPaymentStars(chatID int64, msgID int, lang string) 
 	}
 }
 
-// ── Payment: CryptoBot (real invoice) ─────────────────────────────────────────
+// ── Payment: CryptoBot ─────────────────────────────────────────────────────────
 
-func (h *WebhookHandler) editPaymentCryptoBot(chatID int64, msgID int, lang string) {
-	// Show a loading state first so the user sees immediate feedback.
-	loadingMsg := tr(lang, "⏳ Creating invoice...", "⏳ Создаём счёт...")
-	_ = h.client.EditMessageText(chatID, msgID, loadingMsg, nil)
+func (h *WebhookHandler) editPaymentCryptoBot(chatID int64, msgID int, userID int64, lang string) {
+	// Show loading state immediately so user gets feedback while we call the API.
+	loadMsg := tr(lang, "⏳ <code>CONNECTING TO CRYPTOBOT...</code>", "⏳ <code>ПОДКЛЮЧЕНИЕ К CRYPTOBOT...</code>")
+	_ = h.client.EditMessageText(chatID, msgID, loadMsg, nil)
 
-	invoiceURL, err := h.createCryptoBotInvoice(chatID)
+	invoice, err := h.createCryptoBotInvoice(userID)
 	if err != nil {
-		log.Printf("[HANDLER] createCryptoBotInvoice %d: %v", chatID, err)
-		errBody := "❌ Payment service temporarily unavailable. Please try again or contact @StarkWonder."
+		log.Printf("[HANDLER] createCryptoBotInvoice %d: %v", userID, err)
+		errMsg := "❌ <code>CRYPTOBOT_UNAVAILABLE</code>\n\nContact @StarkWonder."
 		if lang == "ru" {
-			errBody = "❌ Платёжный сервис временно недоступен. Попробуйте позже или свяжитесь с @StarkWonder."
+			errMsg = "❌ <code>CRYPTOBOT_UNAVAILABLE</code>\n\nСвяжитесь с @StarkWonder."
 		}
-		backText := tr(lang, "⬅️ Back", "⬅️ Назад")
 		kb := &InlineKeyboardMarkup{
 			InlineKeyboard: [][]InlineKeyboardButton{
-				{{Text: backText, CallbackData: "cb:vip"}},
+				{{Text: tr(lang, "⬅️ Back", "⬅️ Назад"), CallbackData: "cb:vip"}},
 			},
 		}
-		_ = h.client.EditMessageText(chatID, msgID, errBody, kb)
+		_ = h.client.EditMessageText(chatID, msgID, errMsg, kb)
 		return
 	}
 
 	var body string
 	if lang == "ru" {
-		body = "🤖 <b>Оплата через CryptoBot (@CryptoBot)</b>\n" +
+		body = "🤖 <b>ОПЛАТА — CRYPTOBOT</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"Быстрая оплата в USDT или TON через официального бота @CryptoBot.\n\n" +
-			"Стоимость: <b>$9.99 USDT / TON</b>\n\n" +
-			"После оплаты VIP активируется автоматически."
+			fmt.Sprintf(
+				"<code>> METHOD......... CRYPTOBOT\n"+
+					"> AMOUNT......... $9.99 USDT\n"+
+					"> INVOICE_ID..... %d\n"+
+					"> DURATION....... 30 DAYS\n"+
+					"> AUTO_ACTIVATE.. YES\n"+
+					"──────────────────────\n"+
+					"[ ⚡ INVOICE READY ]</code>\n\n"+
+					"После оплаты нажмите «Проверить оплату».",
+				invoice.ID,
+			)
 	} else {
-		body = "🤖 <b>CryptoBot Payment (@CryptoBot)</b>\n" +
+		body = "🤖 <b>PAYMENT — CRYPTOBOT</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"Fast payment in USDT or TON via official @CryptoBot.\n\n" +
-			"Price: <b>$9.99 USDT / TON</b>\n\n" +
-			"VIP activates automatically after payment."
+			fmt.Sprintf(
+				"<code>> METHOD......... CRYPTOBOT\n"+
+					"> AMOUNT......... $9.99 USDT\n"+
+					"> INVOICE_ID..... %d\n"+
+					"> DURATION....... 30 DAYS\n"+
+					"> AUTO_ACTIVATE.. YES\n"+
+					"──────────────────────\n"+
+					"[ ⚡ INVOICE READY ]</code>\n\n"+
+					"After paying, tap «Check Payment».",
+				invoice.ID,
+			)
 	}
 
-	payBtn := tr(lang, "💳 Pay Invoice", "💳 Оплатить счёт")
-	backText := tr(lang, "⬅️ Back", "⬅️ Назад")
-
+	checkBtn := tr(lang, "🔄 Check Payment", "🔄 Проверить оплату")
 	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: payBtn, URL: invoiceURL}},
-			{{Text: backText, CallbackData: "cb:vip"}},
+			{{Text: tr(lang, "💳 Pay Invoice", "💳 Оплатить счёт"), URL: invoice.PayURL}},
+			{{Text: checkBtn, CallbackData: fmt.Sprintf("pay:cbcheck:%d", invoice.ID)}},
+			{{Text: tr(lang, "⬅️ Back", "⬅️ Назад"), CallbackData: "cb:vip"}},
 		},
 	}
 	if err := h.client.EditMessageText(chatID, msgID, body, kb); err != nil {
@@ -857,17 +875,74 @@ func (h *WebhookHandler) editPaymentCryptoBot(chatID int64, msgID int, lang stri
 	}
 }
 
-// createCryptoBotInvoice calls the Crypto Pay API and returns a real pay_url.
-func (h *WebhookHandler) createCryptoBotInvoice(userID int64) (string, error) {
-	token := ""
-	if h.config != nil {
-		token = h.config.CryptoBotToken
+// handleCryptoBotCheck polls getInvoices and activates VIP if status == "paid".
+func (h *WebhookHandler) handleCryptoBotCheck(chatID int64, msgID int, userID int64, data, lang string) {
+	// data format: "pay:cbcheck:<invoiceID>"
+	parts := strings.SplitN(data, ":", 3)
+	if len(parts) < 3 {
+		return
 	}
-	if token == "" {
-		token = os.Getenv("CRYPTOBOT_TOKEN")
+	invoiceID, err := strconv.ParseInt(parts[2], 10, 64)
+	if err != nil {
+		return
 	}
+
+	status, err := h.getCryptoBotInvoiceStatus(invoiceID)
+	if err != nil {
+		log.Printf("[HANDLER] getCryptoBotInvoiceStatus %d: %v", invoiceID, err)
+		notice := tr(lang, "⚠️ Could not reach CryptoBot. Try again.", "⚠️ Не удалось подключиться. Попробуйте ещё раз.")
+		if err2 := h.client.AnswerCallbackQuery("", notice); err2 != nil {
+			log.Printf("[HANDLER] answerCallback notice: %v", err2)
+		}
+		return
+	}
+
+	if status != "paid" {
+		notice := tr(lang,
+			"⏳ Not paid yet. Complete the invoice then try again.",
+			"⏳ Оплата не найдена. Оплатите счёт и проверьте снова.")
+		// AnswerCallbackQuery was already called at the top of handleCallback.
+		// We cannot call it again for the same queryID (it's already answered).
+		// Instead, update the message text with a status line.
+		// Re-show the cryptobot screen with a status note appended.
+		statusNote := "\n\n<code>> PAYMENT_STATUS.... PENDING ⏳</code>"
+		// fetch current message text and append — simplest: just re-edit with note
+		_ = h.client.EditMessageText(chatID, msgID,
+			fmt.Sprintf("<code>> PAYMENT_STATUS.... PENDING ⏳\n> Try again after completing the invoice.</code>\n\n%s",
+				notice),
+			&InlineKeyboardMarkup{
+				InlineKeyboard: [][]InlineKeyboardButton{
+					{{Text: tr(lang, "🔄 Check Again", "🔄 Проверить снова"),
+						CallbackData: fmt.Sprintf("pay:cbcheck:%d", invoiceID)}},
+					{{Text: tr(lang, "⬅️ Back", "⬅️ Назад"), CallbackData: "cb:vip"}},
+				},
+			},
+		)
+		_ = statusNote
+		return
+	}
+
+	// Status is "paid" — activate VIP.
+	if err := h.storage.SetUserVIP(userID, true); err != nil {
+		log.Printf("[HANDLER] SetUserVIP (cryptobot) %d: %v", userID, err)
+		h.client.SendMessage(chatID, "⚠️ Payment verified but VIP activation failed. Contact @StarkWonder.")
+		return
+	}
+	log.Printf("[PAYMENT] CryptoBot VIP activated for user %d (invoice %d)", userID, invoiceID)
+	h.sendVIPActivatedMessage(chatID, lang)
+}
+
+// cryptoBotInvoice holds what we need from a createInvoice response.
+type cryptoBotInvoice struct {
+	ID     int64
+	PayURL string
+}
+
+// createCryptoBotInvoice calls POST /api/createInvoice and returns the invoice.
+func (h *WebhookHandler) createCryptoBotInvoice(userID int64) (*cryptoBotInvoice, error) {
+	token := h.cryptoBotToken()
 	if token == "" {
-		return "", fmt.Errorf("CRYPTOBOT_TOKEN not configured")
+		return nil, fmt.Errorf("CRYPTOBOT_TOKEN not configured")
 	}
 
 	payload := map[string]interface{}{
@@ -878,14 +953,57 @@ func (h *WebhookHandler) createCryptoBotInvoice(userID int64) (string, error) {
 	}
 	jsonBytes, err := json.Marshal(payload)
 	if err != nil {
-		return "", fmt.Errorf("marshal: %w", err)
+		return nil, fmt.Errorf("marshal: %w", err)
+	}
+	req, err := http.NewRequest(http.MethodPost, "https://pay.crypt.bot/api/createInvoice", bytes.NewBuffer(jsonBytes))
+	if err != nil {
+		return nil, fmt.Errorf("build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Crypto-Pay-API-Token", token)
+
+	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("http do: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Ok     bool   `json:"ok"`
+		Error  string `json:"error"`
+		Result struct {
+			InvoiceID int64  `json:"invoice_id"`
+			PayURL    string `json:"pay_url"`
+		} `json:"result"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode: %w", err)
+	}
+	if !result.Ok {
+		return nil, fmt.Errorf("CryptoBot API error: %s", result.Error)
+	}
+	if result.Result.PayURL == "" {
+		return nil, fmt.Errorf("empty pay_url in response")
+	}
+	return &cryptoBotInvoice{
+		ID:     result.Result.InvoiceID,
+		PayURL: result.Result.PayURL,
+	}, nil
+}
+
+// getCryptoBotInvoiceStatus calls GET /api/getInvoices?invoice_ids=<id>
+// and returns the status string ("active", "paid", "expired").
+func (h *WebhookHandler) getCryptoBotInvoiceStatus(invoiceID int64) (string, error) {
+	token := h.cryptoBotToken()
+	if token == "" {
+		return "", fmt.Errorf("CRYPTOBOT_TOKEN not configured")
 	}
 
-	req, err := http.NewRequest(http.MethodPost, "https://pay.crypt.bot/api/createInvoice", bytes.NewBuffer(jsonBytes))
+	url := fmt.Sprintf("https://pay.crypt.bot/api/getInvoices?invoice_ids=%d", invoiceID)
+	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return "", fmt.Errorf("build request: %w", err)
 	}
-	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Crypto-Pay-API-Token", token)
 
 	resp, err := (&http.Client{Timeout: 8 * time.Second}).Do(req)
@@ -898,7 +1016,10 @@ func (h *WebhookHandler) createCryptoBotInvoice(userID int64) (string, error) {
 		Ok     bool   `json:"ok"`
 		Error  string `json:"error"`
 		Result struct {
-			PayURL string `json:"pay_url"`
+			Items []struct {
+				InvoiceID int64  `json:"invoice_id"`
+				Status    string `json:"status"`
+			} `json:"items"`
 		} `json:"result"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -907,63 +1028,17 @@ func (h *WebhookHandler) createCryptoBotInvoice(userID int64) (string, error) {
 	if !result.Ok {
 		return "", fmt.Errorf("CryptoBot API: %s", result.Error)
 	}
-	if result.Result.PayURL == "" {
-		return "", fmt.Errorf("CryptoBot returned empty pay_url")
+	if len(result.Result.Items) == 0 {
+		return "", fmt.Errorf("invoice %d not found", invoiceID)
 	}
-	return result.Result.PayURL, nil
+	return result.Result.Items[0].Status, nil
 }
 
-// ── Payment: Direct Wallet ─────────────────────────────────────────────────────
-
-func (h *WebhookHandler) editPaymentDirectWallet(chatID int64, msgID int, lang string) {
-	var body string
-	if lang == "ru" {
-		body = "💎 <b>Прямой перевод крипто (TRC20 / SOL)</b>\n" +
-			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"Отправьте ровно <b>$10 USDT</b> (TRC20) или <b>0.05 SOL</b>:\n\n" +
-			"📌 <b>USDT (TRC20):</b>\n<code>T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb</code>\n\n" +
-			"📌 <b>Solana (SOL):</b>\n<code>7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU</code>\n\n" +
-			"После отправки нажмите кнопку ниже или отправьте TxID администратору @StarkWonder."
-	} else {
-		body = "💎 <b>Direct Crypto Wallet (TRC20 / SOL)</b>\n" +
-			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"Transfer exactly <b>$10 USDT</b> (TRC20) or <b>0.05 SOL</b>:\n\n" +
-			"📌 <b>USDT (TRC20):</b>\n<code>T9yD14Nj9j7xAB4dbGeiX9h8unkKHxuWwb</code>\n\n" +
-			"📌 <b>Solana (SOL):</b>\n<code>7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU</code>\n\n" +
-			"After transferring, tap below or message @StarkWonder with your TxID."
+func (h *WebhookHandler) cryptoBotToken() string {
+	if h.config != nil && h.config.CryptoBotToken != "" {
+		return h.config.CryptoBotToken
 	}
-
-	submitBtn := tr(lang, "✅ I Have Paid (Submit TxID)", "✅ Я оплатил (Отправить TxID)")
-	backText := tr(lang, "⬅️ Back", "⬅️ Назад")
-
-	kb := &InlineKeyboardMarkup{
-		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: submitBtn, CallbackData: "pay:done:prompt"}},
-			{{Text: backText, CallbackData: "cb:vip"}},
-		},
-	}
-	if err := h.client.EditMessageText(chatID, msgID, body, kb); err != nil {
-		log.Printf("[HANDLER] editPaymentDirectWallet %d/%d: %v", chatID, msgID, err)
-	}
-}
-
-func (h *WebhookHandler) handleDirectPaymentSubmitted(chatID int64, msgID int, userID int64, data, lang string) {
-	_ = h.storage.AddPendingPayment(userID, "direct_crypto", "PENDING_TX_VERIFY")
-	var body string
-	if lang == "ru" {
-		body = "✅ <b>Платёж зафиксирован на проверку!</b>\n\n" +
-			"Ваш запрос на активацию VIP отправлен администратору.\n" +
-			"Проверка обычно занимает до 15 минут.\n" +
-			"По всем вопросам: @StarkWonder"
-	} else {
-		body = "✅ <b>Payment submitted for verification!</b>\n\n" +
-			"Your VIP activation request has been logged for admin review.\n" +
-			"Usually processed within 15 minutes.\n" +
-			"Need help? Contact @StarkWonder"
-	}
-	if err := h.client.EditMessageText(chatID, msgID, body, backToMenuKB(lang)); err != nil {
-		log.Printf("[HANDLER] handleDirectPaymentSubmitted %d/%d: %v", chatID, msgID, err)
-	}
+	return os.Getenv("CRYPTOBOT_TOKEN")
 }
 
 // ── Help ───────────────────────────────────────────────────────────────────────
@@ -971,144 +1046,67 @@ func (h *WebhookHandler) handleDirectPaymentSubmitted(chatID int64, msgID int, u
 func (h *WebhookHandler) editHelp(chatID int64, msgID int, lang string) {
 	var body string
 	if lang == "ru" {
-		body = "❓ <b>Помощь — команды бота</b>\n" +
+		body = "❓ <b>HELP — КОМАНДЫ</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"<code>/start</code> — главное меню\n" +
-			"<code>/watch &lt;addr&gt; [заметка]</code> — добавить кошелёк в watchlist\n" +
-			"<code>/watchlist</code> — показать watchlist\n" +
-			"<code>/stats</code> — статистика за 24 часа\n" +
-			"<code>/hot</code> — топ горячих кошельков\n" +
-			"<code>/ref</code> — реферальная программа\n\n" +
+			"<code>/start</code>          — главное меню\n" +
+			"<code>/watch &lt;addr&gt;</code>  — добавить в watchlist\n" +
+			"<code>/watchlist</code>      — мой watchlist\n" +
+			"<code>/stats</code>          — статистика 24h\n" +
+			"<code>/hot</code>            — горячие кошельки\n" +
+			"<code>/vip</code>            — VIP пасс\n\n" +
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n" +
 			"<b>Как работают кластеры:</b>\n" +
-			"Система отслеживает покупки на DEX и сигнализирует, " +
-			"когда ≥3 умных кошелька аккумулируют один токен в течение 5 минут."
+			"Система обнаруживает кластер когда <b>≥3</b> смарт-мани кошелька " +
+			"аккумулируют один токен в течение <b>5 минут</b>.\n\n" +
+			"🛡 <b>ВСЕГДА проверяйте токен через RugCheck до покупки!</b>"
 	} else {
-		body = "❓ <b>Help — Bot Commands</b>\n" +
+		body = "❓ <b>HELP — COMMANDS</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"<code>/start</code> — main menu\n" +
-			"<code>/watch &lt;addr&gt; [note]</code> — add wallet to watchlist\n" +
-			"<code>/watchlist</code> — view watchlist\n" +
-			"<code>/stats</code> — 24h statistics\n" +
-			"<code>/hot</code> — top hot wallets\n" +
-			"<code>/ref</code> — referral programme\n\n" +
+			"<code>/start</code>          — main menu\n" +
+			"<code>/watch &lt;addr&gt;</code>  — add to watchlist\n" +
+			"<code>/watchlist</code>      — my watchlist\n" +
+			"<code>/stats</code>          — 24h statistics\n" +
+			"<code>/hot</code>            — hot wallets\n" +
+			"<code>/vip</code>            — VIP pass\n\n" +
+			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n" +
 			"<b>How clusters work:</b>\n" +
-			"The system tracks DEX swaps and signals when ≥3 smart wallets " +
-			"accumulate the same token within 5 minutes."
+			"A cluster fires when <b>≥3</b> smart money wallets accumulate " +
+			"the same token within <b>5 minutes</b>.\n\n" +
+			"🛡 <b>ALWAYS verify tokens via RugCheck before buying!</b>"
 	}
-
 	if err := h.client.EditMessageText(chatID, msgID, body, backToMenuKB(lang)); err != nil {
 		log.Printf("[HANDLER] editHelp %d/%d: %v", chatID, msgID, err)
 	}
 }
 
-// ── Referral system ────────────────────────────────────────────────────────────
-//
-// Revenue model for free users:
-//   - Every user gets a unique referral link.
-//   - When a referred user buys VIP (any payment method), the referrer earns
-//     a commission credit stored in the DB.
-//   - Free users can also earn small credits by simply sharing clusters they
-//     spotted — a "signal share" mechanic (future: tied to verified accuracy).
-//
-// This gives non-VIP users a meaningful earning path while growing your user
-// base virally. You earn on every VIP sale driven by referrals (net positive).
-
-func (h *WebhookHandler) sendReferralMenu(chatID, userID int64, lang string) {
-	text, kb := h.buildReferralContent(userID, lang)
-	if err := h.client.SendMessageWithKeyboard(chatID, text, kb); err != nil {
-		log.Printf("[HANDLER] sendReferralMenu %d: %v", chatID, err)
-	}
-}
-
-func (h *WebhookHandler) editReferralMenu(chatID int64, msgID int, userID int64, lang string) {
-	text, kb := h.buildReferralContent(userID, lang)
-	if err := h.client.EditMessageText(chatID, msgID, text, kb); err != nil {
-		log.Printf("[HANDLER] editReferralMenu %d/%d: %v", chatID, msgID, err)
-	}
-}
-
-func (h *WebhookHandler) buildReferralContent(userID int64, lang string) (string, *InlineKeyboardMarkup) {
-	// Fetch referral stats from storage.
-	// Falls back gracefully if AddReferral / GetReferralStats are not yet implemented.
-	referralCount := 0
-	earningsUSD := 0.0
-	if stats, err := h.storage.GetReferralStats(userID); err == nil && stats != nil {
-		referralCount = stats.TotalReferrals
-		earningsUSD = stats.TotalEarningsUSD
-	}
-
-	botUsername := "SmartClusterBot" // replace with your actual bot @username
-	if h.config != nil && h.config.BotUsername != "" {
-		botUsername = h.config.BotUsername
-	}
-	refLink := fmt.Sprintf("https://t.me/%s?start=ref_%d", botUsername, userID)
-
-	var body string
-	if lang == "ru" {
-		body = fmt.Sprintf(
-			"🤝 <b>Реферальная программа</b>\n"+
-				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
-				"Приглашайте друзей и зарабатывайте <b>20%% комиссии</b> с каждой их VIP-покупки.\n\n"+
-				"👥 Приглашено: <b>%d</b>\n"+
-				"💰 Заработано: <b>$%.2f</b>\n\n"+
-				"🔗 Ваша реферальная ссылка:\n"+
-				"<code>%s</code>\n\n"+
-				"<i>Скопируйте ссылку и отправьте друзьям. Когда они купят VIP — вы получите $2 на баланс.</i>",
-			referralCount, earningsUSD, refLink,
-		)
-	} else {
-		body = fmt.Sprintf(
-			"🤝 <b>Referral Programme</b>\n"+
-				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"+
-				"Invite friends and earn <b>20%% commission</b> on every VIP purchase they make.\n\n"+
-				"👥 Referred: <b>%d</b>\n"+
-				"💰 Earned: <b>$%.2f</b>\n\n"+
-				"🔗 Your referral link:\n"+
-				"<code>%s</code>\n\n"+
-				"<i>Copy the link and share it. When a friend buys VIP, you earn $2 in credit.</i>",
-			referralCount, earningsUSD, refLink,
-		)
-	}
-
-	backText := tr(lang, "⬅️ Back", "⬅️ Назад")
-	kb := &InlineKeyboardMarkup{
-		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: backText, CallbackData: "cb:menu"}},
-		},
-	}
-	return body, kb
-}
-
-// ── Manual / Guide ─────────────────────────────────────────────────────────────
+// ── Manual ─────────────────────────────────────────────────────────────────────
 
 func (h *WebhookHandler) sendManual(chatID int64, lang string) {
 	var body string
 	if lang == "ru" {
-		body = "📖 <b>Руководство пользователя — Smart Cluster Terminal</b>\n" +
+		body = "📖 <b>РУКОВОДСТВО — Smart Cluster Terminal</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"<b>1. Что такое Кластер?</b>\n" +
-			"Кластер — момент, когда несколько независимых Smart Money кошельков начинают аккумулировать один токен в течение 5 минут.\n\n" +
-			"<b>2. Золотое правило — DYOR & RugCheck:</b>\n" +
-			"🛡 <b>ВСЕГДА проверяйте токены через RugCheck</b> перед покупкой! До 90% новых токенов — скам.\n\n" +
-			"<b>3. Как использовать:</b>\n" +
-			"• 📊 Открывайте WebApp-терминал для анализа в реальном времени.\n" +
-			"• 🔔 Настраивайте объём и сети в Настройках.\n" +
-			"• ⭐ Добавляйте кошельки в Watchlist: <code>/watch &lt;addr&gt; [заметка]</code>\n" +
-			"• 🤝 Зарабатывайте через реферальную программу: <code>/ref</code>\n\n" +
-			"⚠️ <b>Важно:</b> Это аналитический инструмент, а не «машина для денег». Делайте собственный анализ (DYOR)!"
+			"<b>1. Что такое кластер?</b>\n" +
+			"≥3 независимых Smart Money кошелька аккумулируют один токен за 5 минут.\n\n" +
+			"<b>2. Золотое правило:</b>\n" +
+			"🛡 Всегда проверяйте через RugCheck! До 90% новых токенов — скам.\n\n" +
+			"<b>3. Как пользоваться:</b>\n" +
+			"• Открывайте WebApp-терминал для анализа в реальном времени\n" +
+			"• Настройте фильтры объёма и сети в ⚙️ Настройках\n" +
+			"• Добавляйте кошельки: <code>/watch &lt;addr&gt;</code>\n\n" +
+			"⚠️ Это аналитический инструмент. Не финансовый совет (NFA / DYOR)."
 	} else {
-		body = "📖 <b>User Guide — Smart Cluster Terminal</b>\n" +
+		body = "📖 <b>USER GUIDE — Smart Cluster Terminal</b>\n" +
 			"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-			"<b>1. What is a Cluster?</b>\n" +
-			"A cluster fires when ≥3 independent Smart Money wallets accumulate the same token within a 5-minute window.\n\n" +
-			"<b>2. The Golden Rule — DYOR & RugCheck:</b>\n" +
-			"🛡 <b>ALWAYS check tokens via RugCheck</b> before acting! Up to 90% of new tokens are scams.\n\n" +
+			"<b>1. What is a cluster?</b>\n" +
+			"≥3 independent Smart Money wallets accumulate the same token within 5 minutes.\n\n" +
+			"<b>2. The golden rule:</b>\n" +
+			"🛡 Always check via RugCheck first! Up to 90% of new tokens are scams.\n\n" +
 			"<b>3. How to use:</b>\n" +
-			"• 📊 Open the WebApp terminal for real-time interactive analysis.\n" +
-			"• 🔔 Configure min volume and networks in Settings.\n" +
-			"• ⭐ Track wallets: <code>/watch &lt;addr&gt; [note]</code>\n" +
-			"• 🤝 Earn money via referrals: <code>/ref</code>\n\n" +
-			"⚠️ <b>Important:</b> This is an analytical scanner, not a magic money printer. Do Your Own Research (DYOR)!"
+			"• Open the WebApp terminal for real-time interactive analysis\n" +
+			"• Configure volume & network filters in ⚙️ Settings\n" +
+			"• Track wallets: <code>/watch &lt;addr&gt;</code>\n\n" +
+			"⚠️ This is an analytical tool. Not financial advice (NFA / DYOR)."
 	}
 	h.client.SendMessageWithKeyboard(chatID, body, backToMenuKB(lang))
 }
@@ -1146,7 +1144,9 @@ func tr(lang, en, ru string) string {
 	return en
 }
 
-func enabledNetworks(u *storage.User) string {
+// enabledNetworksRaw returns a plain-text comma list for use inside <code> blocks.
+// Do NOT use html.EscapeString on the output — it's already safe plain ASCII.
+func enabledNetworksRaw(u *storage.User) string {
 	var nets []string
 	if u.EthEnabled {
 		nets = append(nets, "ETH")
@@ -1161,9 +1161,9 @@ func enabledNetworks(u *storage.User) string {
 		nets = append(nets, "BSC")
 	}
 	if len(nets) == 0 {
-		return "<i>none</i>"
+		return "NONE"
 	}
-	return strings.Join(nets, " · ")
+	return strings.Join(nets, "+")
 }
 
 func emojiCheck(v bool) string {
@@ -1180,9 +1180,7 @@ func maskAddr(addr string) string {
 	return addr[:6] + "…" + addr[len(addr)-4:]
 }
 
-func fmtVolume(v int) string {
-	return fmtFloat(float64(v))
-}
+func fmtVolume(v int) string { return fmtFloat(float64(v)) }
 
 func fmtFloat(v float64) string {
 	switch {

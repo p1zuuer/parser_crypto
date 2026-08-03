@@ -51,6 +51,21 @@ type ClusterRecord struct {
 	CreatedAt         time.Time `json:"CreatedAt"        db:"created_at"`
 }
 
+// WalletHeat represents how active a wallet has been across detected clusters.
+type WalletHeat struct {
+	WalletAddress  string
+	ClusterCount   int
+	TotalVolumeUSD float64
+}
+
+// Stats24h holds aggregate cluster stats for the last 24 hours.
+type Stats24h struct {
+	TotalClusters  int
+	TotalVolumeUSD float64
+	TopToken       string
+	TopChain       string
+}
+
 // Storage wraps the SQLite database connection.
 type Storage struct {
 	db *sql.DB
@@ -74,12 +89,12 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE TABLE IF NOT EXISTS pending_payments (
-	id             INTEGER  PRIMARY KEY AUTOINCREMENT,
-	user_id        INTEGER  NOT NULL,
-	method         TEXT     NOT NULL,
-	tx_id          TEXT     NOT NULL,
-	status         TEXT     NOT NULL DEFAULT 'pending',
-	created_at     DATETIME NOT NULL
+	id         INTEGER  PRIMARY KEY AUTOINCREMENT,
+	user_id    INTEGER  NOT NULL,
+	method     TEXT     NOT NULL,
+	tx_id      TEXT     NOT NULL,
+	status     TEXT     NOT NULL DEFAULT 'pending',
+	created_at DATETIME NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS user_watchlists (
@@ -92,9 +107,9 @@ CREATE TABLE IF NOT EXISTS user_watchlists (
 );
 
 CREATE TABLE IF NOT EXISTS alert_counts (
-	user_id    INTEGER NOT NULL,
-	date_str   TEXT    NOT NULL,
-	count      INTEGER NOT NULL DEFAULT 0,
+	user_id  INTEGER NOT NULL,
+	date_str TEXT    NOT NULL,
+	count    INTEGER NOT NULL DEFAULT 0,
 	PRIMARY KEY(user_id, date_str)
 );
 
@@ -114,8 +129,6 @@ CREATE INDEX IF NOT EXISTS idx_watchlists_user   ON user_watchlists(user_id);
 CREATE INDEX IF NOT EXISTS idx_watchlists_wallet ON user_watchlists(wallet_address);
 CREATE INDEX IF NOT EXISTS idx_clusters_chain    ON clusters(chain);
 CREATE INDEX IF NOT EXISTS idx_clusters_created  ON clusters(created_at);
-
-CREATE TABLE IF NOT EXISTS referrals (id INTEGER PRIMARY KEY AUTOINCREMENT, referrer_id INTEGER NOT NULL, referred_id INTEGER NOT NULL UNIQUE, commission_usd REAL DEFAULT 0, created_at INTEGER NOT NULL);
 `
 
 // ── Init ───────────────────────────────────────────────────────────────────────
@@ -129,31 +142,28 @@ func InitDB(dbPath string) (*Storage, error) {
 	if err := os.MkdirAll(filepath.Dir(dbPath), 0o755); err != nil {
 		return nil, fmt.Errorf("storage: mkdir %s: %w", filepath.Dir(dbPath), err)
 	}
-
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		return nil, fmt.Errorf("storage: open db: %w", err)
 	}
 	// SQLite is single-writer; one connection avoids SQLITE_BUSY churn.
 	db.SetMaxOpenConns(1)
-
 	if err := db.Ping(); err != nil {
 		return nil, fmt.Errorf("storage: ping db: %w", err)
 	}
 	if _, err := db.Exec(schema); err != nil {
 		return nil, fmt.Errorf("storage: apply schema: %w", err)
 	}
-
 	return &Storage{db: db}, nil
 }
 
 // ── User Methods ───────────────────────────────────────────────────────────────
 
-// GetOrCreateUser returns the user from DB, creating them with sensible defaults
-// if they don't exist yet. It also updates username and language on every call.
-func (s *Storage) GetOrCreateUser(userID int64, username, lang string) (*User, error) {
-	if lang == "" {
-		lang = "en"
+// GetOrCreateUser returns the user from DB, creating them with defaults if new.
+// It updates username on every call but NEVER overwrites a saved language preference.
+func (s *Storage) GetOrCreateUser(userID int64, username, bootstrapLang string) (*User, error) {
+	if bootstrapLang == "" {
+		bootstrapLang = "en"
 	}
 
 	u := &User{}
@@ -174,15 +184,16 @@ func (s *Storage) GetOrCreateUser(userID int64, username, lang string) (*User, e
 			 (user_id, username, language, is_vip, tos_accepted, min_volume,
 			  eth_enabled, sol_enabled, base_enabled, bsc_enabled, created_at)
 			 VALUES (?, ?, ?, 0, 0, 10000, 1, 1, 1, 1, ?)`,
-			userID, username, lang, now,
+			userID, username, bootstrapLang, now,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("storage: insert user %d: %w", userID, err)
 		}
 		return &User{
-			UserID: userID, Username: username, Language: lang,
-			TosAccepted: false, MinVolume: 10000, EthEnabled: true, SolEnabled: true,
-			BaseEnabled: true, BscEnabled: true, CreatedAt: now,
+			UserID: userID, Username: username, Language: bootstrapLang,
+			TosAccepted: false, MinVolume: 10000,
+			EthEnabled: true, SolEnabled: true, BaseEnabled: true, BscEnabled: true,
+			CreatedAt: now,
 		}, nil
 	}
 	if err != nil {
@@ -190,6 +201,7 @@ func (s *Storage) GetOrCreateUser(userID int64, username, lang string) (*User, e
 	}
 	u.CreatedAt = parseTime(createdStr)
 
+	// Only update username — never overwrite the DB language with Telegram's.
 	if u.Username != username {
 		u.Username = username
 		if _, err := s.db.Exec(
@@ -208,7 +220,27 @@ func (s *Storage) SetUserTosAccepted(userID int64, accepted bool) error {
 	return err
 }
 
-// UpdateUserSettings persists user alert preferences.
+// SetUserVIP upgrades or downgrades the VIP status of a user.
+// This is the single authoritative function called by both Stars and CryptoBot
+// payment confirmation flows.
+func (s *Storage) SetUserVIP(userID int64, vip bool) error {
+	_, err := s.db.Exec(`UPDATE users SET is_vip = ? WHERE user_id = ?`, vip, userID)
+	if err != nil {
+		return fmt.Errorf("storage: set vip %d=%v: %w", userID, vip, err)
+	}
+	return nil
+}
+
+// SetUserLanguage updates only the language preference for a user.
+func (s *Storage) SetUserLanguage(userID int64, lang string) error {
+	if lang == "" {
+		lang = "en"
+	}
+	_, err := s.db.Exec(`UPDATE users SET language = ? WHERE user_id = ?`, lang, userID)
+	return err
+}
+
+// UpdateUserSettings persists user alert preferences (volume + network toggles).
 func (s *Storage) UpdateUserSettings(userID int64, minVolume int, eth, sol, base, bsc bool) error {
 	_, err := s.db.Exec(
 		`UPDATE users
@@ -218,28 +250,13 @@ func (s *Storage) UpdateUserSettings(userID int64, minVolume int, eth, sol, base
 		minVolume, eth, sol, base, bsc, userID,
 	)
 	if err != nil {
-		return fmt.Errorf("storage: update settings for %d: %w", userID, err)
+		return fmt.Errorf("storage: update settings %d: %w", userID, err)
 	}
 	return nil
 }
 
-// SetUserVIP upgrades (or downgrades) the VIP status of a user.
-func (s *Storage) SetUserVIP(userID int64, vip bool) error {
-	_, err := s.db.Exec(`UPDATE users SET is_vip = ? WHERE user_id = ?`, vip, userID)
-	return err
-}
-
-// SetUserLanguage updates only the language preference.
-func (s *Storage) SetUserLanguage(userID int64, lang string) error {
-	if lang == "" {
-		lang = "en"
-	}
-	_, err := s.db.Exec(`UPDATE users SET language = ? WHERE user_id = ?`, lang, userID)
-	return err
-}
-
-// CheckAndIncrementFreeAlert checks if a free user has reached their daily limit (e.g. 5) and increments if not.
-// Returns true if the alert can be sent, false if daily limit reached.
+// CheckAndIncrementFreeAlert enforces the daily free-tier alert cap.
+// Returns true if the alert may be sent, false if the limit is reached.
 func (s *Storage) CheckAndIncrementFreeAlert(userID int64, maxAlerts int) (bool, error) {
 	dateStr := time.Now().UTC().Format("2006-01-02")
 	tx, err := s.db.Begin()
@@ -249,17 +266,18 @@ func (s *Storage) CheckAndIncrementFreeAlert(userID int64, maxAlerts int) (bool,
 	defer tx.Rollback()
 
 	var count int
-	err = tx.QueryRow(`SELECT count FROM alert_counts WHERE user_id = ? AND date_str = ?`, userID, dateStr).Scan(&count)
+	err = tx.QueryRow(
+		`SELECT count FROM alert_counts WHERE user_id = ? AND date_str = ?`,
+		userID, dateStr,
+	).Scan(&count)
 	if err == sql.ErrNoRows {
 		count = 0
 	} else if err != nil {
 		return false, err
 	}
-
 	if count >= maxAlerts {
 		return false, nil
 	}
-
 	_, err = tx.Exec(
 		`INSERT INTO alert_counts (user_id, date_str, count) VALUES (?, ?, 1)
 		 ON CONFLICT(user_id, date_str) DO UPDATE SET count = count + 1`,
@@ -268,11 +286,7 @@ func (s *Storage) CheckAndIncrementFreeAlert(userID int64, maxAlerts int) (bool,
 	if err != nil {
 		return false, err
 	}
-
-	if err := tx.Commit(); err != nil {
-		return false, err
-	}
-	return true, nil
+	return true, tx.Commit()
 }
 
 // GetAllUsers returns all users (used by the alert broadcaster).
@@ -300,29 +314,20 @@ func (s *Storage) GetAllUsers() ([]User, error) {
 		u.CreatedAt = parseTime(createdStr)
 		users = append(users, u)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("storage: rows err users: %w", err)
-	}
-	return users, nil
+	return users, rows.Err()
 }
 
 // ── Watchlist Methods ──────────────────────────────────────────────────────────
 
-// AddWatchlistWallet saves a wallet address to a user's watchlist.
-// Duplicate entries (same user_id + wallet_address) are silently ignored.
 func (s *Storage) AddWatchlistWallet(userID int64, walletAddress, note string) error {
 	_, err := s.db.Exec(
 		`INSERT OR IGNORE INTO user_watchlists (user_id, wallet_address, note, created_at)
 		 VALUES (?, ?, ?, ?)`,
 		userID, walletAddress, note, time.Now().UTC(),
 	)
-	if err != nil {
-		return fmt.Errorf("storage: add watchlist wallet: %w", err)
-	}
-	return nil
+	return err
 }
 
-// GetWatchlist returns all watchlist entries for a user.
 func (s *Storage) GetWatchlist(userID int64) ([]WatchlistEntry, error) {
 	rows, err := s.db.Query(
 		`SELECT id, user_id, wallet_address, note, created_at
@@ -330,27 +335,22 @@ func (s *Storage) GetWatchlist(userID int64) ([]WatchlistEntry, error) {
 		userID,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("storage: get watchlist: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
-
 	var entries []WatchlistEntry
 	for rows.Next() {
 		var e WatchlistEntry
 		var createdStr string
 		if err := rows.Scan(&e.ID, &e.UserID, &e.WalletAddress, &e.Note, &createdStr); err != nil {
-			return nil, fmt.Errorf("storage: scan watchlist entry: %w", err)
+			return nil, err
 		}
 		e.CreatedAt = parseTime(createdStr)
 		entries = append(entries, e)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("storage: rows err watchlist: %w", err)
-	}
-	return entries, nil
+	return entries, rows.Err()
 }
 
-// RemoveWatchlistWallet deletes a watchlist entry by its row ID (must belong to userID).
 func (s *Storage) RemoveWatchlistWallet(userID, entryID int64) error {
 	_, err := s.db.Exec(
 		`DELETE FROM user_watchlists WHERE id = ? AND user_id = ?`,
@@ -359,8 +359,6 @@ func (s *Storage) RemoveWatchlistWallet(userID, entryID int64) error {
 	return err
 }
 
-// GetWatchlistUsersByWallet returns user IDs that are watching a specific wallet.
-// Used by the broadcaster to send personalised watchlist pings.
 func (s *Storage) GetWatchlistUsersByWallet(walletAddress string) ([]int64, error) {
 	rows, err := s.db.Query(
 		`SELECT DISTINCT user_id FROM user_watchlists WHERE wallet_address = ?`,
@@ -370,7 +368,6 @@ func (s *Storage) GetWatchlistUsersByWallet(walletAddress string) ([]int64, erro
 		return nil, err
 	}
 	defer rows.Close()
-
 	var ids []int64
 	for rows.Next() {
 		var id int64
@@ -379,18 +376,13 @@ func (s *Storage) GetWatchlistUsersByWallet(walletAddress string) ([]int64, erro
 		}
 		ids = append(ids, id)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return ids, nil
+	return ids, rows.Err()
 }
 
 // ── Cluster Methods ────────────────────────────────────────────────────────────
 
-// SaveCluster persists a detected cluster event.
 func (s *Storage) SaveCluster(tokenAddress, tokenSymbol, chain string,
 	buyCount int, totalVolumeUSD float64, timeWindowSeconds int, walletAddress string) error {
-
 	_, err := s.db.Exec(
 		`INSERT INTO clusters
 		 (token_address, token_symbol, chain, buy_count, total_volume_usd,
@@ -399,13 +391,9 @@ func (s *Storage) SaveCluster(tokenAddress, tokenSymbol, chain string,
 		tokenAddress, tokenSymbol, chain, buyCount, totalVolumeUSD,
 		timeWindowSeconds, walletAddress, time.Now().UTC(),
 	)
-	if err != nil {
-		return fmt.Errorf("storage: save cluster: %w", err)
-	}
-	return nil
+	return err
 }
 
-// GetRecentClusters returns the most recent clusters, newest first.
 func (s *Storage) GetRecentClusters(limit int) ([]ClusterRecord, error) {
 	if limit <= 0 {
 		limit = 50
@@ -416,21 +404,19 @@ func (s *Storage) GetRecentClusters(limit int) ([]ClusterRecord, error) {
 		 FROM clusters ORDER BY id DESC LIMIT ?`, limit,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("storage: query clusters: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
-
 	var records []ClusterRecord
 	for rows.Next() {
 		var c ClusterRecord
 		var walletAddr sql.NullString
 		var createdStr string
-
 		if err := rows.Scan(
 			&c.ID, &c.TokenAddress, &c.TokenSymbol, &c.Chain, &c.BuyCount,
 			&c.TotalVolumeUSD, &c.TimeWindowSeconds, &walletAddr, &createdStr,
 		); err != nil {
-			return nil, fmt.Errorf("storage: scan cluster: %w", err)
+			return nil, err
 		}
 		if walletAddr.Valid {
 			c.WalletAddress = walletAddr.String
@@ -440,47 +426,32 @@ func (s *Storage) GetRecentClusters(limit int) ([]ClusterRecord, error) {
 		c.CreatedAt = parseTime(createdStr)
 		records = append(records, c)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("storage: rows err clusters: %w", err)
-	}
-	return records, nil
+	return records, rows.Err()
 }
 
-// Stats24h returns aggregate stats for the last 24 hours.
-type Stats24h struct {
-	TotalClusters  int
-	TotalVolumeUSD float64
-	TopToken       string
-	TopChain       string
-}
-
-// GetStats24h computes cluster statistics for the last 24 hours.
 func (s *Storage) GetStats24h() (*Stats24h, error) {
 	since := time.Now().UTC().Add(-24 * time.Hour)
 	stats := &Stats24h{}
-
 	row := s.db.QueryRow(
-		`SELECT COUNT(*), COALESCE(SUM(total_volume_usd), 0) FROM clusters WHERE created_at >= ?`, since)
+		`SELECT COUNT(*), COALESCE(SUM(total_volume_usd), 0)
+		 FROM clusters WHERE created_at >= ?`, since)
 	if err := row.Scan(&stats.TotalClusters, &stats.TotalVolumeUSD); err != nil {
 		return nil, fmt.Errorf("storage: stats24h aggregate: %w", err)
 	}
-
-	// Top token by volume.
 	row = s.db.QueryRow(
 		`SELECT token_symbol FROM clusters WHERE created_at >= ?
 		 GROUP BY token_symbol ORDER BY SUM(total_volume_usd) DESC LIMIT 1`, since)
-	_ = row.Scan(&stats.TopToken) // ok if no rows
-
-	// Top chain by count.
+	_ = row.Scan(&stats.TopToken)
 	row = s.db.QueryRow(
 		`SELECT chain FROM clusters WHERE created_at >= ?
 		 GROUP BY chain ORDER BY COUNT(*) DESC LIMIT 1`, since)
 	_ = row.Scan(&stats.TopChain)
-
 	return stats, nil
 }
 
-// AddPendingPayment saves a direct crypto payment receipt for admin review.
+// ── Payment Methods ────────────────────────────────────────────────────────────
+
+// AddPendingPayment saves a payment receipt for admin review (manual crypto flow).
 func (s *Storage) AddPendingPayment(userID int64, method, txID string) error {
 	_, err := s.db.Exec(
 		`INSERT INTO pending_payments (user_id, method, tx_id, status, created_at)
@@ -490,16 +461,9 @@ func (s *Storage) AddPendingPayment(userID int64, method, txID string) error {
 	return err
 }
 
-// WalletHeat represents how active a wallet has been across detected clusters.
-type WalletHeat struct {
-	WalletAddress  string
-	ClusterCount   int
-	TotalVolumeUSD float64
-}
+// ── Hot Wallet Methods ─────────────────────────────────────────────────────────
 
-// GetTopWallets returns the wallets that appear in the most clusters within
-// the last N hours — the "hottest" smart-money addresses right now.
-func (s *Storage) GetTopWallets(hours int, limit int) ([]WalletHeat, error) {
+func (s *Storage) GetTopWallets(hours, limit int) ([]WalletHeat, error) {
 	if hours <= 0 {
 		hours = 24
 	}
@@ -507,23 +471,20 @@ func (s *Storage) GetTopWallets(hours int, limit int) ([]WalletHeat, error) {
 		limit = 5
 	}
 	since := time.Now().UTC().Add(-time.Duration(hours) * time.Hour)
-
 	rows, err := s.db.Query(
 		`SELECT wallet_address, COUNT(*) AS cluster_count,
 		        SUM(total_volume_usd) AS total_vol
 		 FROM clusters
-		 WHERE wallet_address IS NOT NULL
-		   AND wallet_address != ''
+		 WHERE wallet_address IS NOT NULL AND wallet_address != ''
 		   AND created_at >= ?
 		 GROUP BY wallet_address
 		 ORDER BY cluster_count DESC, total_vol DESC
 		 LIMIT ?`, since, limit,
 	)
 	if err != nil {
-		return nil, fmt.Errorf("storage: top wallets: %w", err)
+		return nil, err
 	}
 	defer rows.Close()
-
 	var result []WalletHeat
 	for rows.Next() {
 		var h WalletHeat
@@ -532,43 +493,19 @@ func (s *Storage) GetTopWallets(hours int, limit int) ([]WalletHeat, error) {
 		}
 		result = append(result, h)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-	return result, nil
-}
-
-func (s *Storage) AddReferral(referrerID, newUserID int64) error {
-	_, err := s.db.Exec(`INSERT OR IGNORE INTO referrals (referrer_id, referred_id, created_at) VALUES (?, ?, ?)`, referrerID, newUserID, time.Now().Unix())
-	return err
-}
-
-type ReferralStats struct {
-	TotalReferrals   int
-	TotalEarningsUSD float64
-}
-
-func (s *Storage) GetReferralStats(userID int64) (*ReferralStats, error) {
-	row := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(commission_usd), 0) FROM referrals WHERE referrer_id = ?`, userID)
-	var stats ReferralStats
-	if err := row.Scan(&stats.TotalReferrals, &stats.TotalEarningsUSD); err != nil {
-		return nil, err
-	}
-	return &stats, nil
+	return result, rows.Err()
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-// parseTime tries common SQLite date layouts and returns a zero time on failure.
 func parseTime(s string) time.Time {
-	layouts := []string{
+	for _, layout := range []string{
 		time.RFC3339Nano,
 		"2006-01-02 15:04:05.999999999-07:00",
 		"2006-01-02 15:04:05",
 		"2006-01-02T15:04:05Z",
-	}
-	for _, l := range layouts {
-		if t, err := time.Parse(l, s); err == nil {
+	} {
+		if t, err := time.Parse(layout, s); err == nil {
 			return t
 		}
 	}
