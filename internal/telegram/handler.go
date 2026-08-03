@@ -145,75 +145,25 @@ func (h *WebhookHandler) sendStartMenu(chatID int64, firstName string, user *sto
 	if user.IsVIP {
 		plan = "👑 VIP"
 	}
-
 	lang := user.Language
-	webAppURL := h.webAppURL()
-
 	var body string
 	if lang == "ru" {
-		body = fmt.Sprintf(
-			"<pre>�� SMART CLUSTER TERMINAL</pre>\n"+
-				" <b>Привет, %s!</b>\n"+
-				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n"+
-				"📊 Аналитика и безопасность смарт-денег в реальном времени.\n\n"+
-				"👤 План: <b>%s</b>\n"+
-				"🔔 Мин. объём: <b>$%s</b>\n"+
-				"🌐 Сети: %s\n"+
-				"🌐 Язык: <b>Русский (RU)</b>\n\n"+
-				"Выберите действие:",
-			html.EscapeString(firstName),
-			html.EscapeString(plan),
-			fmtVolume(user.MinVolume),
-			enabledNetworks(user),
-		)
+		body = fmt.Sprintf("💎 <b>SMART CLUSTER TERMINAL</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n�� <b>Привет, %s!</b>\n\n📊 Аналитика и безопасность смарт-денег в реальном времени.\n\n👤 План: <b>%s</b>\n🔔 Мин. объём: <b>$%s</b>\n🌐 Сети: %s\n🌐 Язык: <b>Русский (RU)</b>\n\nВыберите действие:", html.EscapeString(firstName), html.EscapeString(plan), fmtVolume(user.MinVolume), enabledNetworks(user))
 	} else {
-		body = fmt.Sprintf(
-			"<pre>💎 SMART CLUSTER TERMINAL</pre>\n"+
-				"👋 <b>Hello, %s!</b>\n"+
-				"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n"+
-				"📊 Real-time Smart Money Analytics & Security.\n\n"+
-				"👤 Plan: <b>%s</b>\n"+
-				"🔔 Min Volume: <b>$%s</b>\n"+
-				"🌐 Networks: %s\n"+
-				"🌐 Language: <b>English (EN)</b>\n\n"+
-				"Choose an action:",
-			html.EscapeString(firstName),
-			html.EscapeString(plan),
-			fmtVolume(user.MinVolume),
-			enabledNetworks(user),
-		)
+		body = fmt.Sprintf("💎 <b>SMART CLUSTER TERMINAL</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n�� <b>Hello, %s!</b>\n\n Real-time Smart Money Analytics & Security.\n\n👤 Plan: <b>%s</b>\n🔔 Min Volume: <b>$%s</b>\n🌐 Networks: %s\n🌐 Language: <b>English (EN)</b>\n\nChoose an action:", html.EscapeString(firstName), html.EscapeString(plan), fmtVolume(user.MinVolume), enabledNetworks(user))
 	}
 
 	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
-			{
-				{Text: tr(lang, "📊 Open Terminal", "📊 Открыть Terminal"), WebApp: &WebAppInfo{URL: webAppURL}},
-			},
-			{
-				{Text: tr(lang, "🔥 Fresh Clusters", "🔥 Свежие кластеры"), CallbackData: "cb:clusters"},
-				{Text: "📈 24h Stats", CallbackData: "cb:stats"},
-			},
-			{
-				{Text: tr(lang, "⭐ My Watchlist", "⭐ Мой Watchlist"), CallbackData: "cb:watchlist"},
-				{Text: tr(lang, "⚙️ Settings", "⚙️ Настройки"), CallbackData: "cb:settings"},
-			},
-			{
-				{Text: tr(lang, "🔥 Hot Wallets", "🔥 Горячие кошельки"), CallbackData: "cb:hot"},
-				{Text: tr(lang, "❓ Help", "❓ Помощь"), CallbackData: "cb:help"},
-			},
-			{
-				{Text: tr(lang, "👑 VIP Pass", "👑 VIP Пасс"), CallbackData: "cb:vip"},
-			},
+			{{Text: tr(lang, "📊 Open Terminal", "📊 Открыть Terminal"), WebApp: &WebAppInfo{URL: h.webAppURL()}}},
+			{{Text: tr(lang, "🔥 Fresh Clusters", "🔥 Свежие кластеры"), CallbackData: "cb:clusters"}, {Text: "📈 24h Stats", CallbackData: "cb:stats"}},
+			{{Text: tr(lang, "⭐ My Watchlist", "⭐ Мой Watchlist"), CallbackData: "cb:watchlist"}, {Text: tr(lang, "⚙️ Settings", "⚙️ Настройки"), CallbackData: "cb:settings"}},
+			{{Text: tr(lang, "🔥 Hot Wallets", "🔥 Горячие кошельки"), CallbackData: "cb:hot"}, {Text: tr(lang, "❓ Help", "❓ Помощь"), CallbackData: "cb:help"}},
+			{{Text: tr(lang, "👑 VIP Pass", "👑 VIP Пасс"), CallbackData: "cb:vip"}},
 		},
 	}
-
-	// Use SendPhoto with a professional crypto banner placeholder URL to force wide bubble rendering, or fallback if photo fails
-	heroBannerURL := "https://images.unsplash.com/photo-1639762681485-074b7f938ba0?w=800&q=80"
-	if err := h.client.SendPhoto(chatID, heroBannerURL, body, kb); err != nil {
-		log.Printf("[HANDLER] sendStartMenu SendPhoto fallback: %v", err)
-		if err := h.client.SendMessageWithKeyboard(chatID, body, kb); err != nil {
-			log.Printf("[HANDLER] sendStartMenu %d: %v", chatID, err)
-		}
+	if err := h.client.SendMessageWithKeyboard(chatID, body, kb); err != nil {
+		log.Printf("[HANDLER] sendStartMenu %d: %v", chatID, err)
 	}
 }
 
