@@ -11,19 +11,10 @@ type Update struct {
 
 // Message is a Telegram message received from a user.
 type Message struct {
-	MessageID         int                `json:"message_id"`
-	From              *User              `json:"from,omitempty"`
-	Chat              Chat               `json:"chat"`
-	Text              string             `json:"text,omitempty"`
-	SuccessfulPayment *SuccessfulPayment `json:"successful_payment,omitempty"`
-}
-
-// SuccessfulPayment contains data about a successful payment.
-type SuccessfulPayment struct {
-	Currency                string `json:"currency"`
-	TotalAmount             int    `json:"total_amount"`
-	InvoicePayload          string `json:"invoice_payload"`
-	TelegramPaymentChargeID string `json:"telegram_payment_charge_id"`
+	MessageID int    `json:"message_id"`
+	From      *User  `json:"from,omitempty"`
+	Chat      Chat   `json:"chat"`
+	Text      string `json:"text,omitempty"`
 }
 
 // CallbackQuery is fired when a user taps an inline keyboard button.
@@ -97,23 +88,4 @@ type APIResponse struct {
 	Ok          bool   `json:"ok"`
 	Description string `json:"description,omitempty"`
 	ErrorCode   int    `json:"error_code,omitempty"`
-}
-
-// LabeledPrice represents a portion of the price for goods or services.
-type LabeledPrice struct {
-	Label  string `json:"label"`
-	Amount int    `json:"amount"`
-}
-
-// SendInvoiceRequest is the body sent to sendInvoice.
-type SendInvoiceRequest struct {
-	ChatID         int64                 `json:"chat_id"`
-	Title          string                `json:"title"`
-	Description    string                `json:"description"`
-	Payload        string                `json:"payload"`
-	ProviderToken  string                `json:"provider_token"`
-	Currency       string                `json:"currency"`
-	Prices         []LabeledPrice        `json:"prices"`
-	StartParameter string                `json:"start_parameter,omitempty"`
-	ReplyMarkup    *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 }

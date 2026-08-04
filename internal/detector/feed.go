@@ -34,19 +34,17 @@ var sampleWallets = []string{
 }
 
 // StartMockFeed starts a background goroutine that generates synthetic swap
-// events into the ClusterEngine at the given interval.
-//
-// Multiple swaps are injected per tick to increase the likelihood of crossing
-// cluster thresholds, making it easy to observe the full alert pipeline
-// during development without waiting for real DEX data.
+// events into the ClusterEngine at the given interval. Wrapped in panic
+// recovery so a malformed synthetic event never brings down the process.
 func StartMockFeed(ctx context.Context, engine *ClusterEngine, interval time.Duration) {
-	ticker := time.NewTicker(interval)
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("[PANIC RECOVER] StartMockFeed recovered: %v", r)
 			}
 		}()
+
+		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		r := rand.New(rand.NewSource(time.Now().UnixNano()))
 
@@ -55,10 +53,22 @@ func StartMockFeed(ctx context.Context, engine *ClusterEngine, interval time.Dur
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				injectBurst(r, engine)
+				safeInjectBurst(r, engine)
 			}
 		}
 	}()
+}
+
+// safeInjectBurst wraps injectBurst with its own recover so that a panic on
+// one tick doesn't kill the ticker loop for all subsequent ticks (the outer
+// recover in StartMockFeed would otherwise end the goroutine permanently).
+func safeInjectBurst(r *rand.Rand, engine *ClusterEngine) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[PANIC RECOVER] injectBurst recovered: %v", rec)
+		}
+	}()
+	injectBurst(r, engine)
 }
 
 // injectBurst sends a cluster-sized burst of swaps on a randomly chosen token
@@ -66,14 +76,13 @@ func StartMockFeed(ctx context.Context, engine *ClusterEngine, interval time.Dur
 func injectBurst(r *rand.Rand, engine *ClusterEngine) {
 	tok := sampleTokens[r.Intn(len(sampleTokens))]
 
-	// Shuffle wallets and pick 3–6 of them to simulate distinct buyers.
 	wallets := make([]string, len(sampleWallets))
 	copy(wallets, sampleWallets)
 	r.Shuffle(len(wallets), func(i, j int) { wallets[i], wallets[j] = wallets[j], wallets[i] })
-	count := 3 + r.Intn(4) // 3..6
+	count := 2 + r.Intn(3) // 2..4, matching the tighter solo sniper thresholds
 
 	for i := 0; i < count; i++ {
-		amount := 10_000.0 + r.Float64()*90_000.0 // $10k–$100k
+		amount := 100.0 + r.Float64()*900.0 // $100–$1000, matching $200 min volume
 		engine.ProcessSwap(SwapEvent{
 			TokenAddress:  tok.Address,
 			TokenSymbol:   tok.Symbol,

@@ -4,6 +4,7 @@ package telegram
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -15,6 +16,10 @@ import (
 )
 
 const apiBase = "https://api.telegram.org"
+
+// defaultTimeout bounds every outbound Telegram API call. A hung Telegram
+// endpoint must never leak a goroutine or stall the caller indefinitely.
+const defaultTimeout = 5 * time.Second
 
 // Client is a minimal Telegram Bot API client.
 type Client struct {
@@ -30,7 +35,7 @@ func NewClient(token string) *Client {
 		token:   token,
 		baseURL: apiBase,
 		httpClient: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 10 * time.Second, // hard ceiling; per-call context is tighter
 		},
 	}
 }
@@ -52,7 +57,7 @@ type SendPhotoRequest struct {
 	ReplyMarkup *InlineKeyboardMarkup `json:"reply_markup,omitempty"`
 }
 
-// SendPhoto sends a photo with an optional caption and inline keyboard (fixes squished UI).
+// SendPhoto sends a photo with an optional caption and inline keyboard.
 func (c *Client) SendPhoto(chatID int64, photoURL, caption string, kb *InlineKeyboardMarkup) error {
 	return c.post("sendPhoto", SendPhotoRequest{
 		ChatID:      chatID,
@@ -63,19 +68,7 @@ func (c *Client) SendPhoto(chatID int64, photoURL, caption string, kb *InlineKey
 	})
 }
 
-// SendInvoice sends a native Telegram invoice via the sendInvoice API method.
-// Use this for Telegram Stars (XTR) payments. The req.ProviderToken MUST be
-// an empty string (not omitted) for Stars invoices, and req.Currency must be "XTR".
-// Telegram will deliver a SuccessfulPayment message to the webhook on completion.
-func (c *Client) SendInvoice(req *SendInvoiceRequest) error {
-	if err := c.post("sendInvoice", req); err != nil {
-		log.Printf("[TELEGRAM] SendInvoice error: %v", err)
-		return err
-	}
-	return nil
-}
-
-// SendMessage sends a plain-text (Markdown) message to chatID.
+// SendMessage sends a plain-text message to chatID.
 func (c *Client) SendMessage(chatID int64, text string) error {
 	return c.SendMessageWithKeyboard(chatID, text, nil)
 }
@@ -119,9 +112,17 @@ func (c *Client) DeleteMessage(chatID int64, messageID int) error {
 
 // SetWebhook registers webhookURL as the target for Telegram updates.
 func (c *Client) SetWebhook(webhookURL string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
 	ep := fmt.Sprintf("%s/bot%s/setWebhook?url=%s",
 		c.baseURL, c.token, url.QueryEscape(webhookURL))
-	resp, err := c.httpClient.Get(ep)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, ep, nil)
+	if err != nil {
+		return fmt.Errorf("telegram: build setWebhook request: %w", err)
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("telegram: setWebhook: %w", err)
 	}
@@ -134,7 +135,7 @@ func (c *Client) SetChatMenuButton(webAppURL string) error {
 	return c.post("setChatMenuButton", map[string]interface{}{
 		"menu_button": map[string]interface{}{
 			"type":    "web_app",
-			"text":    "📊 Terminal",
+			"text":    "📡 Terminal",
 			"web_app": map[string]string{"url": webAppURL},
 		},
 	})
@@ -142,18 +143,29 @@ func (c *Client) SetChatMenuButton(webAppURL string) error {
 
 // ── Internals ──────────────────────────────────────────────────────────────────
 
-// post marshals body, POSTs it to the named Telegram method, and checks the
-// response envelope.
+// post marshals body, POSTs it to the named Telegram method under a strict
+// timeout, and checks the response envelope. Every outbound Telegram call in
+// this client funnels through here, so the timeout guard is applied uniformly.
 func (c *Client) post(method string, body interface{}) error {
 	data, err := json.Marshal(body)
 	if err != nil {
 		return fmt.Errorf("telegram: marshal %s: %w", method, err)
 	}
 
+	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
+	defer cancel()
+
 	ep := fmt.Sprintf("%s/bot%s/%s", c.baseURL, c.token, method)
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, ep, bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("telegram: build %s request: %w", method, err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
 	log.Printf("[TELEGRAM] → %s", method)
 
-	resp, err := c.httpClient.Post(ep, "application/json", bytes.NewReader(data))
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("telegram: POST %s: %w", method, err)
 	}

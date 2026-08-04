@@ -1,14 +1,15 @@
-// Command bot is the entrypoint for smart-cluster-bot.
+// Command bot is the entrypoint for the solo trading sniper station.
 //
 // Start-up sequence:
-//  1. Load config from environment variables.
+//  1. Load config from environment variables (BOT_TOKEN, ADMIN_CHAT_ID required).
 //  2. Load i18n locale files.
-//  3. Open SQLite database and run schema migrations.
-//  4. Connect Telegram client + register webhook.
-//  5. Start cluster detection engine and mock DEX feed.
-//  6. Start alert broadcaster (engine → Telegram users).
-//  7. Start daily digest scheduler.
-//  8. Register HTTP routes and serve.
+//  3. Open SQLite database (WAL mode) and run schema migrations.
+//  4. Seed smart wallets (whales) on first boot.
+//  5. Connect Telegram client + register webhook.
+//  6. Start cluster detection engine (thresholds loaded from DB) and mock feed.
+//  7. Start alert broadcaster (engine → admin) and daily digest.
+//  8. Start the background data pruner (24h retention).
+//  9. Register HTTP routes and serve.
 package main
 
 import (
@@ -26,6 +27,13 @@ import (
 	"smart-cluster-bot/internal/telegram"
 	"smart-cluster-bot/web"
 )
+
+// dataRetention bounds how long cluster history is kept before pruning.
+const dataRetention = 24 * time.Hour
+
+// prunerInterval controls how often the background pruner runs after the
+// initial startup pass.
+const prunerInterval = 1 * time.Hour
 
 func main() {
 	// ── 1. Config ──────────────────────────────────────────────────────────────
@@ -45,11 +53,14 @@ func main() {
 	if err != nil {
 		log.Fatalf("FATAL: storage: %v", err)
 	}
+	defer db.Close()
+
+	// ── 4. Seed whales ─────────────────────────────────────────────────────────
 	if err := db.SeedWallets(); err != nil {
 		log.Printf("WARNING: SeedWallets: %v", err)
 	}
 
-	// ── 4. Telegram client ─────────────────────────────────────────────────────
+	// ── 5. Telegram client ─────────────────────────────────────────────────────
 	tgClient := telegram.NewClient(cfg.BotToken)
 
 	if cfg.WebhookURL != "" {
@@ -60,53 +71,60 @@ func main() {
 		}
 	}
 
-	// Set the chat menu button to open the WebApp (deferred so the bot is
-	// fully ready before we hit the API).
-	if cfg.RenderURL != "" {
+	if webAppURL := resolveWebAppURL(cfg); webAppURL != "" {
 		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[PANIC RECOVER] SetChatMenuButton goroutine: %v", r)
+				}
+			}()
 			time.Sleep(3 * time.Second)
-			if err := tgClient.SetChatMenuButton(cfg.RenderURL + "/app"); err != nil {
+			if err := tgClient.SetChatMenuButton(webAppURL); err != nil {
 				log.Printf("WARNING: SetChatMenuButton: %v", err)
 			} else {
-				log.Printf("INFO: chat menu button → %s/app", cfg.RenderURL)
+				log.Printf("INFO: chat menu button → %s", webAppURL)
 			}
 		}()
 	}
 
-	// ── 5. Cluster detection engine ────────────────────────────────────────────
-	// Parameters: ≥2 distinct wallets, ≥$200 aggregate volume,
-	// 3-minute rolling window, 60-second alert cooldown per token.
-	engine := detector.NewClusterEngine(2, 200.0, 3*time.Minute, 60*time.Second)
+	// ── 6. Cluster detection engine ────────────────────────────────────────────
+	// Thresholds are loaded from the persisted Sniper Settings so a restart
+	// doesn't silently reset tuning done via the Telegram UI.
+	settings, err := db.GetSniperSettings()
+	if err != nil {
+		log.Fatalf("FATAL: load sniper settings: %v", err)
+	}
+	engine := detector.NewClusterEngine(
+		settings.MinWallets,
+		settings.MinVolumeUSD,
+		time.Duration(settings.WindowSeconds)*time.Second,
+		60*time.Second, // per-token cooldown
+	)
 
 	ctx := context.Background()
 
 	// Start mock DEX feed (replace with a real feed adapter in production).
-	detector.StartMockFeed(ctx, engine, 15*time.Minute)
+	detector.StartMockFeed(ctx, engine, 90*time.Second)
 
-	// ── 6. Alert broadcaster ───────────────────────────────────────────────────
-	telegram.StartAlertBroadcaster(ctx, tgClient, db, engine.AlertsChan)
+	// ── 7. Alert broadcaster + daily digest ────────────────────────────────────
+	telegram.StartAlertBroadcaster(ctx, tgClient, db, cfg, engine.AlertsChan)
+	telegram.StartDailyDigest(ctx, tgClient, db, cfg)
 
-	// ── 7. Daily digest ────────────────────────────────────────────────────────
-	telegram.StartDailyDigest(ctx, tgClient, db)
+	// ── 8. Background pruner ────────────────────────────────────────────────────
+	startPruner(ctx, db)
 
-	// ── 8. HTTP routes ─────────────────────────────────────────────────────────
-	webhookHandler := telegram.NewWebhookHandler(tgClient, db, cfg, bundle)
+	// ── 9. HTTP routes ─────────────────────────────────────────────────────────
+	webhookHandler := telegram.NewWebhookHandler(tgClient, db, cfg, bundle, engine)
 
 	mux := http.NewServeMux()
-
-	// Telegram webhook endpoint.
 	mux.Handle("/webhook", webhookHandler)
-
-	// Also accept updates on / for setups where Telegram is pointed at the root.
 	mux.Handle("/", webhookHandler)
 
-	// Health check (used by Render / load balancers).
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
 
-	// WebApp static files embedded in the binary.
 	fileServer := http.FileServer(http.FS(web.WebFS))
 	mux.Handle("/app/", http.StripPrefix("/app/", fileServer))
 	mux.HandleFunc("/app", func(w http.ResponseWriter, r *http.Request) {
@@ -119,7 +137,6 @@ func main() {
 		w.Write(data)
 	})
 
-	// REST API: recent clusters (consumed by the WebApp).
 	mux.HandleFunc("/api/clusters", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
@@ -128,58 +145,16 @@ func main() {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-
 		clusters, err := db.GetRecentClusters(50)
 		if err != nil {
 			log.Printf("ERROR: /api/clusters: %v", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
-
-		// Mock fallback if DB is empty so WebApp ALWAYS displays demo clusters
-		if len(clusters) == 0 {
-			clusters = []storage.ClusterRecord{
-				{
-					ID:                1,
-					TokenAddress:      "0x6982508145454Ce325ddBe47a25d4ec3d2311933",
-					TokenSymbol:       "PEPE",
-					Chain:             "Ethereum",
-					BuyCount:          5,
-					TotalVolumeUSD:    142500.0,
-					TimeWindowSeconds: 300,
-					WalletAddress:     "0xd8dA6BF26964aF9D7eEd9e03E53415D37aA96045",
-					CreatedAt:         time.Now().UTC().Add(-5 * time.Minute),
-				},
-				{
-					ID:                2,
-					TokenAddress:      "EKpQGSJtjMFqKZ9KQanSqYXRcF8fBopzLHYxdM65zcjm",
-					TokenSymbol:       "WIF",
-					Chain:             "Solana",
-					BuyCount:          4,
-					TotalVolumeUSD:    98400.0,
-					TimeWindowSeconds: 300,
-					WalletAddress:     "CuieVDEDtLo7FypA9SbLM9saXFdb1dsshEkyErMqkRQq",
-					CreatedAt:         time.Now().UTC().Add(-12 * time.Minute),
-				},
-				{
-					ID:                3,
-					TokenAddress:      "0x4200000000000000000000000000000000000042",
-					TokenSymbol:       "BRETT",
-					Chain:             "Base",
-					BuyCount:          3,
-					TotalVolumeUSD:    65000.0,
-					TimeWindowSeconds: 300,
-					WalletAddress:     "0xAb5801a7D398351b8bE11C439e05C5B3259aeC9B",
-					CreatedAt:         time.Now().UTC().Add(-20 * time.Minute),
-				},
-			}
-		}
-
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(clusters)
 	})
 
-	// REST API: 24h stats (consumed by the WebApp dashboard).
 	mux.HandleFunc("/api/stats", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, OPTIONS")
@@ -188,26 +163,72 @@ func main() {
 			w.WriteHeader(http.StatusOK)
 			return
 		}
-
 		stats, err := db.GetStats24h()
-		if err != nil || stats == nil || stats.TotalClusters == 0 {
-			stats = &storage.Stats24h{
-				TotalClusters:  12,
-				TotalVolumeUSD: 305900.0,
-				TopToken:       "PEPE",
-				TopChain:       "Ethereum",
-			}
+		if err != nil {
+			log.Printf("ERROR: /api/stats: %v", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(stats)
 	})
 
 	addr := ":" + cfg.Port
-	log.Printf("INFO: smart-cluster-bot listening on %s", addr)
-	if cfg.RenderURL != "" {
-		log.Printf("INFO: WebApp → %s/app", cfg.RenderURL)
-	}
+	log.Printf("INFO: solo sniper station listening on %s", addr)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("FATAL: server: %v", err)
 	}
+}
+
+// resolveWebAppURL picks the Mini App URL to register as the chat menu
+// button, preferring an explicit override.
+func resolveWebAppURL(cfg *config.Config) string {
+	if cfg.WebAppURL != "" {
+		return cfg.WebAppURL
+	}
+	if cfg.RenderURL != "" {
+		return cfg.RenderURL + "/app"
+	}
+	return ""
+}
+
+// startPruner runs an immediate prune pass, then repeats on prunerInterval.
+// Wrapped in panic recovery so a database hiccup never crashes the process.
+func startPruner(ctx context.Context, db *storage.Storage) {
+	runPrune := func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[PANIC RECOVER] pruner recovered: %v", r)
+			}
+		}()
+		n, err := db.PruneOldData(dataRetention)
+		if err != nil {
+			log.Printf("WARNING: prune: %v", err)
+			return
+		}
+		if n > 0 {
+			log.Printf("INFO: pruner removed %d cluster record(s) older than %s", n, dataRetention)
+		}
+	}
+
+	// Immediate pass at startup so a long-stopped bot doesn't carry stale data.
+	runPrune()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[PANIC RECOVER] pruner goroutine: %v", r)
+			}
+		}()
+		ticker := time.NewTicker(prunerInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				runPrune()
+			}
+		}
+	}()
 }

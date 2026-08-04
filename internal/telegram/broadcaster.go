@@ -10,202 +10,200 @@ import (
 	"strings"
 	"time"
 
+	"smart-cluster-bot/internal/config"
 	"smart-cluster-bot/internal/detector"
 	"smart-cluster-bot/internal/storage"
 )
 
-// explorerURL returns a block-explorer link for the given chain and address.
-func explorerURL(chain, addr string) string {
-	switch strings.ToLower(chain) {
-	case "ethereum", "eth":
-		return "https://etherscan.io/token/" + addr
-	case "solana", "sol":
-		return "https://solscan.io/token/" + addr
-	case "base":
-		return "https://basescan.org/token/" + addr
-	case "bsc", "bnb":
-		return "https://bscscan.com/token/" + addr
-	default:
-		return "https://etherscan.io/token/" + addr
-	}
-}
+// rugCheckTimeout bounds every call to the RugCheck API. This is deliberately
+// short — a slow safety check must never delay or block alert delivery.
+const rugCheckTimeout = 4 * time.Second
 
-// dexScreenerURL builds the DEXScreener chart URL for a token address.
-func dexScreenerURL(chain, addr string) string {
-	return fmt.Sprintf("https://dexscreener.com/%s/%s", strings.ToLower(chain), addr)
-}
-
-// birdeyeURL builds the Birdeye / GMGN alternative chart URL.
-func birdeyeURL(chain, addr string) string {
-	if strings.EqualFold(chain, "solana") || strings.EqualFold(chain, "sol") {
-		return "https://birdeye.so/token/" + addr + "?chain=solana"
-	}
-	return "https://gmgn.ai/" + strings.ToLower(chain) + "/token/" + addr
-}
-
-// contractCheckURL returns a Rugcheck / Safety check URL.
-func contractCheckURL(chain, addr string) string {
-	switch strings.ToLower(chain) {
-	case "solana", "sol":
-		return "https://rugcheck.xyz/tokens/" + addr
-	default:
-		return "https://app.staysafu.org/scan?ca=" + addr
-	}
-}
-
-// RugCheckReport represents the response structure from RugCheck API summary.
+// RugCheckReport is our decode target for RugCheck's summary endpoint.
+// Field names are best-effort based on RugCheck's public summary schema;
+// unknown/absent fields simply decode to zero values rather than erroring,
+// so a schema drift degrades gracefully instead of crashing the broadcaster.
 type RugCheckReport struct {
-	Score int `json:"score"`
+	Score           int    `json:"score"`
+	MintAuthority   string `json:"mintAuthority"`
+	FreezeAuthority string `json:"freezeAuthority"`
+	TokenMeta       struct {
+		Mutable bool `json:"mutable"`
+	} `json:"tokenMeta"`
+	Markets []struct {
+		LP struct {
+			LPLockedPct float64 `json:"lpLockedPct"`
+		} `json:"lp"`
+	} `json:"markets"`
 	Risks []struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Level       string `json:"level"`
-		Score       int    `json:"score"`
+		Name  string `json:"name"`
+		Level string `json:"level"`
 	} `json:"risks"`
 }
 
-// checkRugCheck queries the RugCheck API for Solana tokens with a 3-second timeout.
-// Returns (safetyStatusText, shouldSkip, error)
-// safetyStatusText:
-// - "🛡️ AUTO-RUGCHECK: PASSED (Liquidity Locked / Mint Disabled)"
-// - "🛡️ AUTO-RUGCHECK: UNVERIFIED (API Timeout)" or similar on failure/timeout
-// shouldSkip: true if dangerous risks or high risk score > 5000.
-func checkRugCheck(chain, address string) (string, bool, error) {
+// minSafeLPLockedPct is the minimum acceptable percentage of locked
+// liquidity across reported markets before we treat liquidity as "unlocked".
+const minSafeLPLockedPct = 50.0
+
+// checkRugCheck queries the RugCheck API for Solana tokens under a strict
+// timeout. Returns (safetyBadge, shouldBlock, error).
+//
+// Hard-blocking conditions (shouldBlock=true):
+//  1. Freeze authority present (non-empty, non-null) — token can be frozen.
+//  2. Token metadata is mutable — symbol/name/image can change post-launch.
+//  3. Liquidity is unlocked or locked below minSafeLPLockedPct.
+//  4. Any risk entry reports level "danger" or "critical".
+//
+// Non-Solana chains and API hiccups (timeout, non-200, malformed JSON, rate
+// limiting) never block — they degrade to an "UNVERIFIED" badge so the bot
+// keeps functioning through network flakiness rather than freezing alerts.
+func checkRugCheck(ctx context.Context, baseURL, chain, address string) (string, bool, error) {
 	c := strings.ToLower(chain)
 	if c != "solana" && c != "sol" {
-		// Non-solana tokens pass automatic rugcheck by default without failing/blocking
-		return "🛡️ AUTO-RUGCHECK: PASSED (Non-Solana Chain)", false, nil
+		return "🛡 AUTO-RUGCHECK: PASSED (Non-Solana Chain)", false, nil
 	}
 
-	url := fmt.Sprintf("https://api.rugcheck.xyz/v1/tokens/%s/report/summary", address)
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	reqCtx, cancel := context.WithTimeout(ctx, rugCheckTimeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	url := fmt.Sprintf("%s/tokens/%s/report/summary", strings.TrimSuffix(baseURL, "/"), address)
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return "🛡️ AUTO-RUGCHECK: UNVERIFIED (API Error)", false, err
+		return "🛡 AUTO-RUGCHECK: UNVERIFIED (Request Error)", false, err
 	}
 
-	client := &http.Client{Timeout: 3 * time.Second}
+	client := &http.Client{Timeout: rugCheckTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		// Timeout or network failure
-		return "🛡️ AUTO-RUGCHECK: UNVERIFIED (API Timeout)", false, nil
+		// Timeout, DNS failure, connection refused, etc. — never block on this.
+		return "🛡 AUTO-RUGCHECK: UNVERIFIED (API Timeout)", false, nil
 	}
 	defer resp.Body.Close()
 
+	if resp.StatusCode == http.StatusTooManyRequests {
+		return "🛡 AUTO-RUGCHECK: UNVERIFIED (Rate Limited 429)", false, nil
+	}
 	if resp.StatusCode != http.StatusOK {
-		return "🛡️ AUTO-RUGCHECK: UNVERIFIED (API Status " + fmt.Sprintf("%d", resp.StatusCode) + ")", false, nil
+		return fmt.Sprintf("🛡 AUTO-RUGCHECK: UNVERIFIED (API Status %d)", resp.StatusCode), false, nil
 	}
 
 	var report RugCheckReport
 	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
-		return "🛡️ AUTO-RUGCHECK: UNVERIFIED (Parse Error)", false, nil
+		return "🛡 AUTO-RUGCHECK: UNVERIFIED (Parse Error)", false, nil
 	}
 
-	// Check conditions:
-	// - High risk score > 5000
-	if report.Score > 5000 {
-		return "🛑 RISK WARNING: FAILED RUGCHECK (High Score: " + fmt.Sprintf("%d", report.Score) + ")", true, nil
+	// 1. Freeze authority enabled.
+	if strings.TrimSpace(report.FreezeAuthority) != "" {
+		return "🛑 RUGCHECK FAILED: FREEZE AUTHORITY ENABLED", true, nil
 	}
 
-	// - Dangerous risks (e.g. unlocked liquidity, freeze authority enabled, danger level)
-	for _, risk := range report.Risks {
-		lvl := strings.ToLower(risk.Level)
-		name := strings.ToLower(risk.Name)
-		desc := strings.ToLower(risk.Description)
+	// 2. Mutable metadata.
+	if report.TokenMeta.Mutable {
+		return "🛑 RUGCHECK FAILED: MUTABLE METADATA", true, nil
+	}
 
-		if lvl == "danger" || lvl == "critical" || strings.Contains(name, "freeze") || strings.Contains(name, "unlocked") || strings.Contains(desc, "unlocked") {
-			return fmt.Sprintf("🛑 RISK WARNING: FAILED RUGCHECK (%s)", risk.Name), true, nil
+	// 3. Liquidity unlocked / below safe threshold.
+	if len(report.Markets) > 0 {
+		var maxLocked float64
+		for _, m := range report.Markets {
+			if m.LP.LPLockedPct > maxLocked {
+				maxLocked = m.LP.LPLockedPct
+			}
+		}
+		if maxLocked < minSafeLPLockedPct {
+			return fmt.Sprintf("🛑 RUGCHECK FAILED: LIQUIDITY %.0f%% LOCKED (MIN %.0f%%)", maxLocked, minSafeLPLockedPct), true, nil
 		}
 	}
 
-	return "🛡️ AUTO-RUGCHECK: PASSED (Liquidity Locked / Mint Disabled)", false, nil
-}
-
-// chainNetworkMatch returns true when the alert's chain matches a user's
-// enabled-network preferences.
-func chainNetworkMatch(chain string, u storage.User) bool {
-	c := strings.ToLower(chain)
-	switch {
-	case strings.Contains(c, "eth") || c == "ethereum":
-		return u.EthEnabled
-	case strings.Contains(c, "sol") || c == "solana":
-		return u.SolEnabled
-	case c == "base":
-		return u.BaseEnabled
-	case strings.Contains(c, "bsc") || c == "bnb":
-		return u.BscEnabled
-	default:
-		return true
+	// 4. Explicit danger/critical risk flags.
+	for _, risk := range report.Risks {
+		lvl := strings.ToLower(risk.Level)
+		if lvl == "danger" || lvl == "critical" {
+			return fmt.Sprintf("🛑 RUGCHECK FAILED: %s", strings.ToUpper(risk.Name)), true, nil
+		}
 	}
+
+	// Overall high score is an additional soft signal even without a named risk.
+	if report.Score > 5000 {
+		return fmt.Sprintf("🛑 RUGCHECK FAILED: HIGH RISK SCORE (%d)", report.Score), true, nil
+	}
+
+	return "🛡 AUTO-RUGCHECK: PASSED", false, nil
 }
 
-// formatAlertMessage builds the rich HTML alert body sent to users.
-func formatAlertMessage(alert detector.ClusterAlert, safetyLine string) string {
-	chainEmoji := chainEmoji(alert.Chain)
+// formatAlertMessage builds the rich HTML alert body sent to the admin.
+// All dynamic content is HTML-escaped before embedding to prevent Telegram
+// parse-mode panics on adversarial token names/symbols.
+func formatAlertMessage(alert detector.ClusterAlert, safetyLine string, isWhaleMatch bool) string {
+	chainEmo := chainEmoji(alert.Chain)
 	volStr := fmtFloat(alert.TotalVolumeUSD)
 	windowMin := alert.TimeWindowSeconds / 60
 	if windowMin < 1 {
 		windowMin = 1
 	}
 
-	avgEntry := alert.TotalVolumeUSD / float64(alert.BuyCount)
-	if alert.BuyCount == 0 {
-		avgEntry = alert.TotalVolumeUSD
+	avgEntry := alert.TotalVolumeUSD
+	if alert.BuyCount > 0 {
+		avgEntry = alert.TotalVolumeUSD / float64(alert.BuyCount)
 	}
 
-	badge := "🟢 STAGE: INITIAL ACCUMULATION (SAFE ENTRY)"
+	entryBadge := "🟢 SAFE ENTRY (INITIAL ACCUMULATION)"
 	if alert.TimeWindowSeconds > 120 {
-		badge = "⚠️ STAGE: LATE ENTRY - HIGH RISK"
+		entryBadge = "⚠️ LATE ENTRY — HIGH RISK"
+	}
+
+	whaleLine := ""
+	if isWhaleMatch {
+		whaleLine = "\n🐋 <b>SEEDED WHALE MATCH!</b>"
 	}
 
 	return fmt.Sprintf(
-		"<b>🚨 CLUSTER & INTELLIGENCE ALERT!</b>\n\n"+
+		"<b>🚨 CLUSTER ALERT</b>%s\n\n"+
 			"%s <b>%s</b> | <code>%s</code>\n\n"+
+			"%s\n"+
 			"%s\n\n"+
-			"💰 Total Cluster Volume: <b>$%s</b>\n"+
-			"👛 Smart Wallets Involved: <b>%d</b>\n"+
-			"📊 Average Entry Price: <b>$%s</b>\n"+
-			"⏱ Time Window: <b>%d min</b>\n"+
+			"💰 Volume: <b>$%s</b>\n"+
+			"👛 Wallets: <b>%d</b>\n"+
+			"📊 Avg Entry: <b>$%s</b>\n"+
+			"⏱ Window: <b>%d min</b>\n"+
 			"📍 Lead Wallet: <code>%s</code>\n\n"+
-			"🔗 Contract Address:\n<code>%s</code>\n\n"+
-			"%s",
-		chainEmoji,
+			"🔗 Contract:\n<code>%s</code>",
+		whaleLine,
+		chainEmo,
 		html.EscapeString(alert.TokenSymbol),
 		html.EscapeString(alert.Chain),
-		badge,
-		html.EscapeString(volStr),
+		entryBadge,
+		safetyLine,
+		volStr,
 		alert.BuyCount,
-		html.EscapeString(fmtFloat(avgEntry)),
+		fmtFloat(avgEntry),
 		windowMin,
 		html.EscapeString(maskAddr(alert.LeadWallet)),
 		alert.TokenAddress,
-		safetyLine,
 	)
 }
 
-// alertKeyboard builds the interactive inline keyboard attached to every alert with analytical links and 1-click buy buttons.
+// alertKeyboard builds the interactive inline keyboard attached to every alert.
 func alertKeyboard(alert detector.ClusterAlert) *InlineKeyboardMarkup {
 	contract := alert.TokenAddress
-	return &InlineKeyboardMarkup{
-		InlineKeyboard: [][]InlineKeyboardButton{
-			{
-				{Text: "⚡ Buy on Photon", URL: "https://photon-sol.tinyastro.io/en/r/@clusterbot/" + contract},
-				{Text: "🎯 Buy via Trojan", URL: "https://t.me/solana_trojanbot?start=r-clusterbot-" + contract},
-			},
-			{
-				{Text: "📊 DexScreener", URL: "https://dexscreener.com/solana/" + contract},
-				{Text: "🛡 RugCheck", URL: "https://rugcheck.xyz/tokens/" + contract},
-			},
-			{
-				{Text: "⭐ Track Wallet", CallbackData: "cb:watchlist"},
-			},
+	rows := [][]InlineKeyboardButton{
+		{
+			{Text: "⚡ Photon", URL: "https://photon-sol.tinyastro.io/en/r/@sniperbot/" + contract},
+			{Text: "🎯 Trojan", URL: "https://t.me/solana_trojanbot?start=r-sniperbot-" + contract},
+		},
+		{
+			{Text: "📊 DexScreener", URL: "https://dexscreener.com/solana/" + contract},
+			{Text: "🛡 RugCheck", URL: "https://rugcheck.xyz/tokens/" + contract},
 		},
 	}
+	if alert.LeadWallet != "" {
+		rows = append(rows, []InlineKeyboardButton{
+			{Text: "🐋 Add Whale", CallbackData: "cb:whale:add:" + alert.LeadWallet},
+		})
+	}
+	return &InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-// chainEmoji maps a chain name to a display emoji.
 func chainEmoji(chain string) string {
 	switch strings.ToLower(chain) {
 	case "ethereum", "eth":
@@ -222,11 +220,13 @@ func chainEmoji(chain string) string {
 }
 
 // StartAlertBroadcaster runs as a goroutine that consumes alerts from
-// alertsChan and fans them out to every qualifying user in the database.
+// alertsChan and delivers them to the single admin chat. Wrapped in panic
+// recovery — a bad alert or downstream failure must never kill the process.
 func StartAlertBroadcaster(
 	ctx context.Context,
 	client *Client,
 	store *storage.Storage,
+	cfg *config.Config,
 	alertsChan <-chan detector.ClusterAlert,
 ) {
 	go func() {
@@ -243,21 +243,36 @@ func StartAlertBroadcaster(
 				if !ok {
 					return
 				}
-				broadcastAlert(client, store, alert)
+				safeBroadcastAlert(ctx, client, store, cfg, alert)
 			}
 		}
 	}()
 }
 
-func broadcastAlert(client *Client, store *storage.Storage, alert detector.ClusterAlert) {
-	// Perform RugCheck verification before broadcasting
-	safetyLine, shouldSkip, err := checkRugCheck(alert.Chain, alert.TokenAddress)
-	if err != nil {
-		log.Printf("[RUGCHECK] Error checking token %s: %v", alert.TokenAddress, err)
+// safeBroadcastAlert wraps broadcastAlert with its own recover so a panic
+// processing one alert doesn't kill the broadcaster goroutine for subsequent
+// alerts (the outer recover only protects the loop from a single fatal exit).
+func safeBroadcastAlert(ctx context.Context, client *Client, store *storage.Storage, cfg *config.Config, alert detector.ClusterAlert) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[PANIC RECOVER] broadcastAlert recovered: %v", r)
+		}
+	}()
+	broadcastAlert(ctx, client, store, cfg, alert)
+}
+
+func broadcastAlert(ctx context.Context, client *Client, store *storage.Storage, cfg *config.Config, alert detector.ClusterAlert) {
+	rugCheckBase := "https://api.rugcheck.xyz/v1"
+	if cfg != nil && cfg.RugCheckBaseURL != "" {
+		rugCheckBase = cfg.RugCheckBaseURL
 	}
 
-	if shouldSkip {
-		log.Printf("[BROADCASTER] Skipping alert for dangerous token %s (%s): %s", alert.TokenSymbol, alert.TokenAddress, safetyLine)
+	safetyLine, shouldBlock, err := checkRugCheck(ctx, rugCheckBase, alert.Chain, alert.TokenAddress)
+	if err != nil {
+		log.Printf("[RUGCHECK] error checking %s (%s): %v", alert.TokenSymbol, alert.TokenAddress, err)
+	}
+	if shouldBlock {
+		log.Printf("[BROADCASTER] blocked dangerous token %s (%s): %s", alert.TokenSymbol, alert.TokenAddress, safetyLine)
 		return
 	}
 
@@ -269,110 +284,54 @@ func broadcastAlert(client *Client, store *storage.Storage, alert detector.Clust
 		log.Printf("[BROADCASTER] SaveCluster: %v", err)
 	}
 
-	users, err := store.GetAllUsers()
-	if err != nil {
-		log.Printf("[BROADCASTER] GetAllUsers: %v", err)
+	isWhaleMatch := false
+	if alert.LeadWallet != "" {
+		if match, err := store.IsSmartWallet(alert.LeadWallet); err == nil {
+			isWhaleMatch = match
+		}
+	}
+
+	if cfg == nil || cfg.AdminChatID == 0 {
+		log.Printf("[BROADCASTER] no AdminChatID configured — dropping alert for %s", alert.TokenSymbol)
 		return
 	}
 
-	msg := formatAlertMessage(alert, safetyLine)
+	msg := formatAlertMessage(alert, safetyLine, isWhaleMatch)
 	kb := alertKeyboard(alert)
-
-	notified := make(map[int64]struct{}, len(users))
-
-	for _, u := range users {
-		if !u.IsVIP {
-			// Free tier: check min volume $25,000+ or default, max 5 live alerts per day
-			minVol := u.MinVolume
-			if minVol < 25000 {
-				minVol = 25000
-			}
-			if float64(minVol) > alert.TotalVolumeUSD {
-				continue
-			}
-			allowed, err := store.CheckAndIncrementFreeAlert(u.UserID, 5)
-			if err != nil {
-				log.Printf("[BROADCASTER] CheckAndIncrementFreeAlert %d: %v", u.UserID, err)
-				continue
-			}
-			if !allowed {
-				continue
-			}
-		} else {
-			if float64(u.MinVolume) > alert.TotalVolumeUSD {
-				continue
-			}
-		}
-
-		if !chainNetworkMatch(alert.Chain, u) {
-			continue
-		}
-
-		sendMsg := msg
-		if !u.IsVIP {
-			sendMsg += "\n\n<i>💡 Free Plan: Live alert preview. Upgrade to VIP for unlimited $10k+ alerts & custom watchlist!</i>"
-		}
-
-		if err := client.SendMessageWithKeyboard(u.UserID, sendMsg, kb); err != nil {
-			log.Printf("[BROADCASTER] send to %d: %v", u.UserID, err)
-		}
-		notified[u.UserID] = struct{}{}
-
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	if alert.LeadWallet == "" {
-		return
-	}
-	watchUsers, err := store.GetWatchlistUsersByWallet(alert.LeadWallet)
-	if err != nil {
-		log.Printf("[BROADCASTER] GetWatchlistUsersByWallet: %v", err)
-		return
-	}
-	for _, uid := range watchUsers {
-		if _, already := notified[uid]; already {
-			continue
-		}
-		watchMsg := fmt.Sprintf(
-			"<b>🎯 Watchlist Hit!</b>\n\n"+
-				"Monitored wallet <code>%s</code> just bought <b>%s</b> on <b>%s</b>!\n\n"+
-				"💰 Deal Volume: <b>$%s</b>\n"+
-				"🔗 Contract:\n<code>%s</code>\n\n"+
-				"%s",
-			html.EscapeString(maskAddr(alert.LeadWallet)),
-			html.EscapeString(alert.TokenSymbol),
-			html.EscapeString(alert.Chain),
-			html.EscapeString(fmtFloat(alert.TotalVolumeUSD)),
-			alert.TokenAddress,
-			safetyLine,
-		)
-		if err := client.SendMessageWithKeyboard(uid, watchMsg, kb); err != nil {
-			log.Printf("[BROADCASTER] watchlist ping %d: %v", uid, err)
-		}
-		time.Sleep(20 * time.Millisecond)
+	if err := client.SendMessageWithKeyboard(cfg.AdminChatID, msg, kb); err != nil {
+		log.Printf("[BROADCASTER] send to admin %d: %v", cfg.AdminChatID, err)
 	}
 }
 
-// StartDailyDigest schedules a daily summary message sent to every user at 09:00 UTC.
-func StartDailyDigest(ctx context.Context, client *Client, store *storage.Storage) {
+// StartDailyDigest schedules a daily summary message sent to the admin at 09:00 UTC.
+func StartDailyDigest(ctx context.Context, client *Client, store *storage.Storage, cfg *config.Config) {
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
-				log.Printf("[DIGEST PANIC RECOVER] StartDailyDigest recovered: %v", r)
+				log.Printf("[PANIC RECOVER] StartDailyDigest recovered: %v", r)
 			}
 		}()
 		for {
 			next := nextDailyDigestTime()
-			log.Printf("[DIGEST] Next daily digest scheduled at %s", next.Format(time.RFC3339))
+			log.Printf("[DIGEST] next daily digest at %s", next.Format(time.RFC3339))
 
 			select {
 			case <-ctx.Done():
 				return
 			case <-time.After(time.Until(next)):
-				sendDailyDigest(client, store)
+				safeSendDailyDigest(client, store, cfg)
 			}
 		}
 	}()
+}
+
+func safeSendDailyDigest(client *Client, store *storage.Storage, cfg *config.Config) {
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[PANIC RECOVER] sendDailyDigest recovered: %v", r)
+		}
+	}()
+	sendDailyDigest(client, store, cfg)
 }
 
 func nextDailyDigestTime() time.Time {
@@ -384,21 +343,22 @@ func nextDailyDigestTime() time.Time {
 	return next
 }
 
-func sendDailyDigest(client *Client, store *storage.Storage) {
-	log.Printf("[DIGEST] Sending daily digest to all users")
+func sendDailyDigest(client *Client, store *storage.Storage, cfg *config.Config) {
+	if cfg == nil || cfg.AdminChatID == 0 {
+		log.Printf("[DIGEST] no AdminChatID configured — skipping")
+		return
+	}
 
 	stats, err := store.GetStats24h()
 	if err != nil {
 		log.Printf("[DIGEST] GetStats24h: %v", err)
 		return
 	}
-
 	clusters, err := store.GetRecentClusters(3)
 	if err != nil {
 		log.Printf("[DIGEST] GetRecentClusters: %v", err)
 		return
 	}
-
 	hotWallets, err := store.GetTopWallets(24, 3)
 	if err != nil {
 		log.Printf("[DIGEST] GetTopWallets: %v", err)
@@ -406,7 +366,7 @@ func sendDailyDigest(client *Client, store *storage.Storage) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("<b>📰 Daily Digest — Smart Cluster Terminal</b>\n")
+	sb.WriteString("<b>📰 Daily Digest — Solo Sniper Station</b>\n")
 	sb.WriteString(fmt.Sprintf("🗓 %s UTC\n\n", time.Now().UTC().Format("02 Jan 2006")))
 
 	sb.WriteString("📊 <b>24h Summary:</b>\n")
@@ -448,29 +408,15 @@ func sendDailyDigest(client *Client, store *storage.Storage) {
 				html.EscapeString(fmtFloat(w.TotalVolumeUSD)),
 			))
 		}
-		sb.WriteString("\n")
 	}
 
-	sb.WriteString("<i>Open the terminal for complete intelligence.</i>")
-	digestMsg := sb.String()
-
-	digestKB := &InlineKeyboardMarkup{
+	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
-			{{Text: "📊 Open Terminal", CallbackData: "cb:clusters"}},
-			{{Text: "📈 Full Stats", CallbackData: "cb:stats"}},
+			{{Text: "📡 Active Clusters", CallbackData: "cb:clusters"}},
 		},
 	}
-
-	users, err := store.GetAllUsers()
-	if err != nil {
-		log.Printf("[DIGEST] GetAllUsers: %v", err)
-		return
+	if err := client.SendMessageWithKeyboard(cfg.AdminChatID, sb.String(), kb); err != nil {
+		log.Printf("[DIGEST] send to admin %d: %v", cfg.AdminChatID, err)
 	}
-	for _, u := range users {
-		if err := client.SendMessageWithKeyboard(u.UserID, digestMsg, digestKB); err != nil {
-			log.Printf("[DIGEST] send to %d: %v", u.UserID, err)
-		}
-		time.Sleep(30 * time.Millisecond)
-	}
-	log.Printf("[DIGEST] Done — sent to %d users", len(users))
+	log.Printf("[DIGEST] sent to admin")
 }
