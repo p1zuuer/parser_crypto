@@ -223,7 +223,7 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 	header := "Manage Whales\n\n"
 
 	if err != nil || len(wallets) == 0 {
-		body := header + "No whales tracked yet.\n\nAdd one: /addwhale <address> [note]"
+		body := header + "No whales tracked yet.\n\nAdd one: /addwhale <code>address</code> [note]"
 		return body, &InlineKeyboardMarkup{
 			InlineKeyboard: [][]InlineKeyboardButton{{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}}},
 		}
@@ -235,7 +235,7 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 
 	var rows [][]InlineKeyboardButton
 	for _, w := range wallets {
-		fmt.Fprintf(&sb, "%s", html.EscapeString(w.WalletAddress))
+		fmt.Fprintf(&sb, "<code>%s</code>", html.EscapeString(w.WalletAddress))
 		if w.Note != "" {
 			fmt.Fprintf(&sb, " — %s", html.EscapeString(w.Note))
 		}
@@ -244,7 +244,7 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 			{Text: "🗑 Remove " + shortLabel(w.WalletAddress), CallbackData: fmt.Sprintf("cb:whale:rm:%d", w.ID)},
 		})
 	}
-	sb.WriteString("\nAdd more: /addwhale <address> [note]")
+	sb.WriteString("\nAdd more: /addwhale <code>address</code> [note]")
 	rows = append(rows, []InlineKeyboardButton{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}})
 	return sb.String(), &InlineKeyboardMarkup{InlineKeyboard: rows}
 }
@@ -252,7 +252,7 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 func (h *WebhookHandler) handleAddWhaleCommand(chatID int64, text string) {
 	parts := strings.Fields(text)
 	if len(parts) < 2 {
-		h.client.SendMessage(chatID, "Usage: /addwhale <address> [note]")
+		h.client.SendMessage(chatID, "Usage: /addwhale <code>address</code> [note]")
 		return
 	}
 	addr := parts[1]
@@ -263,7 +263,7 @@ func (h *WebhookHandler) handleAddWhaleCommand(chatID int64, text string) {
 		return
 	}
 	reply := fmt.Sprintf(
-		"Whale added.\n\n%s\nNote: %s",
+		"Whale added.\n\n<code>%s</code>\nNote: %s",
 		html.EscapeString(addr), html.EscapeString(or(note, "—")),
 	)
 	h.client.SendMessageWithKeyboard(chatID, reply, &InlineKeyboardMarkup{
