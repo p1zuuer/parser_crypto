@@ -6,10 +6,11 @@
 //  3. Open SQLite database (WAL mode) and run schema migrations.
 //  4. Seed smart wallets (whales) on first boot.
 //  5. Connect Telegram client + register webhook.
-//  6. Start cluster detection engine (thresholds loaded from DB) and mock feed.
-//  7. Start alert broadcaster (engine → admin) and daily digest.
-//  8. Start the background data pruner (24h retention).
-//  9. Register HTTP routes and serve.
+//  6. Start the cluster detection engine (thresholds loaded from DB).
+//  7. Construct the auto-buy backend (real JupiterBuyer if configured, else Noop).
+//  8. Start the alert broadcaster (engine → admin, with auto-buy) and daily digest.
+//  9. Start the background data pruner (24h retention).
+//  10. Register HTTP routes (Telegram webhook + Helius live-feed webhook) and serve.
 package main
 
 import (
@@ -22,17 +23,15 @@ import (
 
 	"smart-cluster-bot/internal/config"
 	"smart-cluster-bot/internal/detector"
+	"smart-cluster-bot/internal/dex"
 	"smart-cluster-bot/internal/i18n"
 	"smart-cluster-bot/internal/storage"
 	"smart-cluster-bot/internal/telegram"
+	"smart-cluster-bot/internal/trading"
 	"smart-cluster-bot/web"
 )
 
-// dataRetention bounds how long cluster history is kept before pruning.
 const dataRetention = 24 * time.Hour
-
-// prunerInterval controls how often the background pruner runs after the
-// initial startup pass.
 const prunerInterval = 1 * time.Hour
 
 func main() {
@@ -88,8 +87,10 @@ func main() {
 	}
 
 	// ── 6. Cluster detection engine ────────────────────────────────────────────
-	// Thresholds are loaded from the persisted Sniper Settings so a restart
-	// doesn't silently reset tuning done via the Telegram UI.
+	// Thresholds are loaded from persisted Sniper Settings so a restart
+	// doesn't silently reset tuning done via the Telegram UI. Real swap data
+	// now arrives exclusively via the Helius webhook — the mock feed has
+	// been removed for live trading.
 	settings, err := db.GetSniperSettings()
 	if err != nil {
 		log.Fatalf("FATAL: load sniper settings: %v", err)
@@ -103,21 +104,34 @@ func main() {
 
 	ctx := context.Background()
 
-	// Start mock DEX feed (replace with a real feed adapter in production).
-	detector.StartMockFeed(ctx, engine, 90*time.Second)
+	// ── 7. Auto-buy backend ─────────────────────────────────────────────────────
+	var buyer trading.AutoBuyer = trading.NoopBuyer{}
+	if cfg.AutoBuyEnabled {
+		jupiterBuyer, err := trading.NewJupiterBuyer(cfg.SolPrivateKey, cfg.SolanaRPCURL)
+		if err != nil {
+			log.Printf("WARNING: auto-buy requested but wallet init failed, falling back to Noop: %v", err)
+		} else {
+			buyer = jupiterBuyer
+			log.Printf("INFO: auto-buy ENABLED — live trades will execute for $%.2f per Solana cluster", cfg.AutoBuyAmountUSD)
+		}
+	} else {
+		log.Printf("INFO: auto-buy disabled (set AUTO_BUY_ENABLED=true and SOL_PRIVATE_KEY to enable)")
+	}
 
-	// ── 7. Alert broadcaster + daily digest ────────────────────────────────────
-	telegram.StartAlertBroadcaster(ctx, tgClient, db, cfg, engine.AlertsChan)
+	// ── 8. Alert broadcaster + daily digest ────────────────────────────────────
+	telegram.StartAlertBroadcaster(ctx, tgClient, db, cfg, buyer, engine.AlertsChan)
 	telegram.StartDailyDigest(ctx, tgClient, db, cfg)
 
-	// ── 8. Background pruner ────────────────────────────────────────────────────
+	// ── 9. Background pruner ────────────────────────────────────────────────────
 	startPruner(ctx, db)
 
-	// ── 9. HTTP routes ─────────────────────────────────────────────────────────
+	// ── 10. HTTP routes ─────────────────────────────────────────────────────────
 	webhookHandler := telegram.NewWebhookHandler(tgClient, db, cfg, bundle, engine)
+	heliusHandler := dex.NewHeliusHandler(engine, cfg.HeliusWebhookSecret)
 
 	mux := http.NewServeMux()
 	mux.Handle("/webhook", webhookHandler)
+	mux.Handle("/webhook/helius", heliusHandler)
 	mux.Handle("/", webhookHandler)
 
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
@@ -175,13 +189,12 @@ func main() {
 
 	addr := ":" + cfg.Port
 	log.Printf("INFO: solo sniper station listening on %s", addr)
+	log.Printf("INFO: point your Helius webhook at %s/webhook/helius", cfg.RenderURL)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		log.Fatalf("FATAL: server: %v", err)
 	}
 }
 
-// resolveWebAppURL picks the Mini App URL to register as the chat menu
-// button, preferring an explicit override.
 func resolveWebAppURL(cfg *config.Config) string {
 	if cfg.WebAppURL != "" {
 		return cfg.WebAppURL
@@ -192,8 +205,6 @@ func resolveWebAppURL(cfg *config.Config) string {
 	return ""
 }
 
-// startPruner runs an immediate prune pass, then repeats on prunerInterval.
-// Wrapped in panic recovery so a database hiccup never crashes the process.
 func startPruner(ctx context.Context, db *storage.Storage) {
 	runPrune := func() {
 		defer func() {
@@ -211,7 +222,6 @@ func startPruner(ctx context.Context, db *storage.Storage) {
 		}
 	}
 
-	// Immediate pass at startup so a long-stopped bot doesn't carry stale data.
 	runPrune()
 
 	go func() {

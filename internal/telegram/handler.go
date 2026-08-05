@@ -88,52 +88,45 @@ func (h *WebhookHandler) handleMessage(msg *Message) {
 	switch {
 	case text == "/start":
 		h.sendStartMenu(chatID)
-
 	case strings.HasPrefix(text, "/addwhale"):
 		h.handleAddWhaleCommand(chatID, text)
-
 	case text == "/whales":
 		h.sendWhalesMenu(chatID)
-
 	case text == "/clusters":
 		h.sendClustersMenu(chatID)
-
 	case text == "/settings":
 		h.sendSettingsMenu(chatID)
-
 	default:
 		h.sendStartMenu(chatID)
 	}
 }
 
-// ── Start menu (3 solo options) ─────────────────────────────────────────────────
+// ── Start menu ───────────────────────────────────────────────────────────────
 
 func (h *WebhookHandler) sendStartMenu(chatID int64) {
-	body := "🎯 <b>SOLO SNIPER STATION</b>\n" +
-		"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-		"<code>> ENGINE......... ONLINE\n" +
-		"> MODE........... SOLO ADMIN\n" +
-		"──────────────────────\n" +
-		"[ 🟢 MONITORING ACTIVE ]</code>\n\n" +
-		"Select a module:"
+	body := h.startMenuText()
 	if err := h.client.SendMessageWithKeyboard(chatID, body, h.mainMenuKB()); err != nil {
 		log.Printf("[HANDLER] sendStartMenu %d: %v", chatID, err)
 	}
 }
 
 func (h *WebhookHandler) editStartMenu(chatID int64, msgID int) {
-	body := "🎯 <b>SOLO SNIPER STATION</b>\n" +
-		"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-		"<code>> ENGINE......... ONLINE\n" +
-		"> MODE........... SOLO ADMIN\n" +
-		"──────────────────────\n" +
-		"[ 🟢 MONITORING ACTIVE ]</code>\n\n" +
-		"Select a module:"
+	body := h.startMenuText()
 	if err := h.client.EditMessageText(chatID, msgID, body, h.mainMenuKB()); err != nil {
 		log.Printf("[HANDLER] editStartMenu fallback %d/%d: %v", chatID, msgID, err)
 		_ = h.client.DeleteMessage(chatID, msgID)
 		_ = h.client.SendMessageWithKeyboard(chatID, body, h.mainMenuKB())
 	}
+}
+
+func (h *WebhookHandler) startMenuText() string {
+	autoBuyStatus := "Off"
+	if h.config != nil && h.config.AutoBuyEnabled {
+		autoBuyStatus = fmt.Sprintf("On ($%.2f per trade)", h.config.AutoBuyAmountUSD)
+	}
+	return "Solo Sniper Station\n\n" +
+		"Monitoring is active. Choose a module below.\n\n" +
+		"Auto-Buy: " + autoBuyStatus
 }
 
 func (h *WebhookHandler) mainMenuKB() *InlineKeyboardMarkup {
@@ -173,36 +166,30 @@ func (h *WebhookHandler) buildClustersContent() (string, *InlineKeyboardMarkup) 
 	clusters, clustersErr := h.storage.GetRecentClusters(5)
 
 	var sb strings.Builder
-	sb.WriteString("📡 <b>ACTIVE CLUSTERS</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n")
-	sb.WriteString(fmt.Sprintf(
-		"<code>> MIN_WALLETS.... %d\n"+
-			"> MIN_VOLUME..... $%.0f\n"+
-			"> WINDOW......... %ds\n"+
-			"──────────────────────\n"+
-			"[ 🟢 MONITORING ]</code>\n\n",
+	sb.WriteString("Active Clusters\n\n")
+	fmt.Fprintf(&sb,
+		"Detection thresholds: %d+ wallets, $%.0f+ volume, %ds window.\n\n",
 		minWallets, minVolume, int(window.Seconds()),
-	))
+	)
 
 	if statsErr == nil && stats != nil {
-		sb.WriteString(fmt.Sprintf(
-			"24h: <b>%d</b> clusters · $%s volume\n\n",
-			stats.TotalClusters, fmtFloat(stats.TotalVolumeUSD),
-		))
+		fmt.Fprintf(&sb, "Last 24h: %d clusters, $%s total volume.\n\n",
+			stats.TotalClusters, fmtFloat(stats.TotalVolumeUSD))
 	}
 
 	if clustersErr != nil || len(clusters) == 0 {
-		sb.WriteString("<i>No clusters detected yet.</i>")
+		sb.WriteString("No clusters detected yet.")
 	} else {
-		sb.WriteString("<b>Recent:</b>\n")
+		sb.WriteString("Recent clusters:\n\n")
 		for _, c := range clusters {
-			sb.WriteString(fmt.Sprintf(
-				"• <b>%s</b> <code>[%s]</code>\n  <code>vol: $%s  buys: %d</code>\n  <code>%s</code>\n\n",
+			fmt.Fprintf(&sb,
+				"%s (%s)\nVolume: $%s — Buys: %d\nContract: %s\n\n",
 				html.EscapeString(c.TokenSymbol),
 				html.EscapeString(c.Chain),
 				fmtFloat(c.TotalVolumeUSD),
 				c.BuyCount,
 				c.TokenAddress,
-			))
+			)
 		}
 	}
 
@@ -233,10 +220,10 @@ func (h *WebhookHandler) editWhalesMenu(chatID int64, msgID int) {
 
 func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 	wallets, err := h.storage.GetSmartWallets()
-	header := "🐋 <b>MANAGE WHALES</b>\n<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n"
+	header := "Manage Whales\n\n"
 
 	if err != nil || len(wallets) == 0 {
-		body := header + "<i>No whales tracked.</i>\n\nAdd one: <code>/addwhale &lt;address&gt; [note]</code>"
+		body := header + "No whales tracked yet.\n\nAdd one: /addwhale <address> [note]"
 		return body, &InlineKeyboardMarkup{
 			InlineKeyboard: [][]InlineKeyboardButton{{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}}},
 		}
@@ -244,21 +231,20 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 
 	var sb strings.Builder
 	sb.WriteString(header)
-	sb.WriteString(fmt.Sprintf("<code>> TRACKED_WHALES. %d</code>\n\n", len(wallets)))
+	fmt.Fprintf(&sb, "Tracking %d wallet(s):\n\n", len(wallets))
 
 	var rows [][]InlineKeyboardButton
 	for _, w := range wallets {
-		masked := maskAddr(w.WalletAddress)
-		fmt.Fprintf(&sb, "🐋 <code>%s</code>", html.EscapeString(masked))
+		fmt.Fprintf(&sb, "%s", html.EscapeString(w.WalletAddress))
 		if w.Note != "" {
 			fmt.Fprintf(&sb, " — %s", html.EscapeString(w.Note))
 		}
 		sb.WriteString("\n")
 		rows = append(rows, []InlineKeyboardButton{
-			{Text: "🗑 " + masked, CallbackData: fmt.Sprintf("cb:whale:rm:%d", w.ID)},
+			{Text: "🗑 Remove " + shortLabel(w.WalletAddress), CallbackData: fmt.Sprintf("cb:whale:rm:%d", w.ID)},
 		})
 	}
-	sb.WriteString("\nAdd more: <code>/addwhale &lt;address&gt; [note]</code>")
+	sb.WriteString("\nAdd more: /addwhale <address> [note]")
 	rows = append(rows, []InlineKeyboardButton{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}})
 	return sb.String(), &InlineKeyboardMarkup{InlineKeyboard: rows}
 }
@@ -266,18 +252,18 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 func (h *WebhookHandler) handleAddWhaleCommand(chatID int64, text string) {
 	parts := strings.Fields(text)
 	if len(parts) < 2 {
-		h.client.SendMessage(chatID, "ℹ️ Usage: <code>/addwhale &lt;address&gt; [note]</code>")
+		h.client.SendMessage(chatID, "Usage: /addwhale <address> [note]")
 		return
 	}
 	addr := parts[1]
 	note := strings.Join(parts[2:], " ")
 	if err := h.storage.AddSmartWallet(addr, note); err != nil {
 		log.Printf("[HANDLER] AddSmartWallet: %v", err)
-		h.client.SendMessage(chatID, "❌ Failed to add whale.")
+		h.client.SendMessage(chatID, "Failed to add whale.")
 		return
 	}
 	reply := fmt.Sprintf(
-		"✅ <b>Whale added</b>\n\n<code>%s</code>\n📝 %s",
+		"Whale added.\n\n%s\nNote: %s",
 		html.EscapeString(addr), html.EscapeString(or(note, "—")),
 	)
 	h.client.SendMessageWithKeyboard(chatID, reply, &InlineKeyboardMarkup{
@@ -319,22 +305,20 @@ func (h *WebhookHandler) editSettingsMenu(chatID int64, msgID int) {
 func (h *WebhookHandler) buildSettingsContent() (string, *InlineKeyboardMarkup) {
 	st, err := h.storage.GetSniperSettings()
 	if err != nil || st == nil {
-		return "❌ Error loading settings.", &InlineKeyboardMarkup{
+		return "Error loading settings.", &InlineKeyboardMarkup{
 			InlineKeyboard: [][]InlineKeyboardButton{{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}}},
 		}
 	}
 
-	body := "⚙️ <b>SNIPER SETTINGS (ANTI-FOMO)</b>\n" +
-		"<b>━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━</b>\n\n" +
-		fmt.Sprintf(
-			"<code>> MIN_WALLETS.... %d\n"+
-				"> MIN_VOLUME..... $%.0f\n"+
-				"> WINDOW......... %ds\n"+
-				"> CHAINS......... %s\n"+
-				"──────────────────────\n"+
-				"[ 🔧 LIVE CONFIG ]</code>",
-			st.MinWallets, st.MinVolumeUSD, st.WindowSeconds, enabledChainsRaw(st),
-		)
+	body := fmt.Sprintf(
+		"Sniper Settings (Anti-FOMO)\n\n"+
+			"Minimum wallets: %d\n"+
+			"Minimum volume: $%.0f\n"+
+			"Time window: %ds\n"+
+			"Chains: %s\n\n"+
+			"Changes apply immediately — no restart needed.",
+		st.MinWallets, st.MinVolumeUSD, st.WindowSeconds, enabledChains(st),
+	)
 
 	kb := &InlineKeyboardMarkup{
 		InlineKeyboard: [][]InlineKeyboardButton{
@@ -345,15 +329,15 @@ func (h *WebhookHandler) buildSettingsContent() (string, *InlineKeyboardMarkup) 
 				{Text: "5", CallbackData: "cb:set:wallets:5"},
 			},
 			{
-				{Text: "$200", CallbackData: "cb:set:vol:200"},
 				{Text: "$500", CallbackData: "cb:set:vol:500"},
-				{Text: "$1k", CallbackData: "cb:set:vol:1000"},
+				{Text: "$1.5k", CallbackData: "cb:set:vol:1500"},
+				{Text: "$3k", CallbackData: "cb:set:vol:3000"},
 				{Text: "$5k", CallbackData: "cb:set:vol:5000"},
 			},
 			{
 				{Text: "60s", CallbackData: "cb:set:window:60"},
+				{Text: "120s", CallbackData: "cb:set:window:120"},
 				{Text: "180s", CallbackData: "cb:set:window:180"},
-				{Text: "300s", CallbackData: "cb:set:window:300"},
 			},
 			{
 				{Text: emojiCheck(st.EthEnabled) + " ETH", CallbackData: "cb:set:net:eth"},
@@ -375,7 +359,6 @@ func (h *WebhookHandler) handleSettingsUpdate(chatID int64, msgID int, data stri
 	}
 
 	parts := strings.Split(data, ":")
-	// cb:set:<field>:<value>
 	if len(parts) < 4 {
 		return
 	}
@@ -414,13 +397,8 @@ func (h *WebhookHandler) handleSettingsUpdate(chatID int64, msgID int, data stri
 		return
 	}
 
-	// Propagate live — no restart required.
 	if h.engine != nil {
-		h.engine.UpdateThresholds(
-			st.MinWallets,
-			st.MinVolumeUSD,
-			secondsToDuration(st.WindowSeconds),
-		)
+		h.engine.UpdateThresholds(st.MinWallets, st.MinVolumeUSD, secondsToDuration(st.WindowSeconds))
 	}
 
 	h.editSettingsMenu(chatID, msgID)
@@ -444,26 +422,20 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 	switch {
 	case data == "cb:menu":
 		h.editStartMenu(chatID, msgID)
-
 	case data == "cb:clusters":
 		h.editClustersMenu(chatID, msgID)
-
 	case data == "cb:whales":
 		h.editWhalesMenu(chatID, msgID)
-
 	case data == "cb:settings":
 		h.editSettingsMenu(chatID, msgID)
-
 	case strings.HasPrefix(data, "cb:whale:rm:"):
 		h.handleRemoveWhale(chatID, msgID, data)
-
 	case strings.HasPrefix(data, "cb:whale:add:"):
 		addr := strings.TrimPrefix(data, "cb:whale:add:")
 		if err := h.storage.AddSmartWallet(addr, "Added from alert"); err != nil {
 			log.Printf("[HANDLER] AddSmartWallet from alert: %v", err)
 		}
 		h.editWhalesMenu(chatID, msgID)
-
 	case strings.HasPrefix(data, "cb:set:"):
 		h.handleSettingsUpdate(chatID, msgID, data)
 	}
@@ -473,13 +445,11 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 
 func (h *WebhookHandler) engineThresholds() (int, float64, time.Duration) {
 	if h.engine == nil {
-		return 2, 200, 180 * time.Second
+		return 3, 1500, 120 * time.Second
 	}
 	return h.engine.Thresholds()
 }
 
-// secondsToDuration converts a plain integer seconds value (as stored in
-// sniper_settings) into a time.Duration for the live detector engine.
 func secondsToDuration(seconds int) time.Duration {
 	return time.Duration(seconds) * time.Second
 }
@@ -501,7 +471,7 @@ func (h *WebhookHandler) webAppURL() string {
 
 // ── Shared formatting helpers ──────────────────────────────────────────────────
 
-func enabledChainsRaw(st *storage.SniperSettings) string {
+func enabledChains(st *storage.SniperSettings) string {
 	var nets []string
 	if st.EthEnabled {
 		nets = append(nets, "ETH")
@@ -516,9 +486,9 @@ func enabledChainsRaw(st *storage.SniperSettings) string {
 		nets = append(nets, "BSC")
 	}
 	if len(nets) == 0 {
-		return "NONE"
+		return "none"
 	}
-	return strings.Join(nets, "+")
+	return strings.Join(nets, ", ")
 }
 
 func emojiCheck(v bool) string {
@@ -528,11 +498,14 @@ func emojiCheck(v bool) string {
 	return "⬜"
 }
 
-func maskAddr(addr string) string {
+// shortLabel produces a short button-only label (Telegram buttons have tight
+// width limits); this is purely cosmetic for the button text and never used
+// for the full address shown in message bodies.
+func shortLabel(addr string) string {
 	if len(addr) <= 10 {
 		return addr
 	}
-	return addr[:6] + "…" + addr[len(addr)-4:]
+	return addr[:4] + "…" + addr[len(addr)-4:]
 }
 
 func fmtFloat(v float64) string {

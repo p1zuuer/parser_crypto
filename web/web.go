@@ -1,3 +1,4 @@
+// Package web embeds the Mini App static assets served at /app.
 package web
 
 import "embed"

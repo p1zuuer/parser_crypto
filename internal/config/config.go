@@ -30,6 +30,19 @@ type Config struct {
 	HTTPTimeoutSeconds int
 	// RugCheckBaseURL allows pointing at a mock/staging RugCheck instance.
 	RugCheckBaseURL string
+	// SolPrivateKey is the base58-encoded Solana wallet private key used to
+	// sign auto-buy transactions. Empty disables auto-buy entirely.
+	SolPrivateKey string
+	// SolanaRPCURL is the RPC endpoint used to broadcast signed transactions.
+	SolanaRPCURL string
+	// AutoBuyAmountUSD is the approximate USD size of every auto-buy trade.
+	AutoBuyAmountUSD float64
+	// AutoBuyEnabled gates whether the broadcaster ever attempts an auto-buy,
+	// independent of whether a private key is configured (extra safety switch).
+	AutoBuyEnabled bool
+	// HeliusWebhookSecret, if set, is checked against the "Authorization"
+	// header on incoming Helius webhook requests to reject unauthenticated calls.
+	HeliusWebhookSecret string
 }
 
 const (
@@ -82,6 +95,23 @@ func Load() (*Config, error) {
 			cfg.HTTPTimeoutSeconds = n
 		}
 	}
+
+	cfg.SolPrivateKey = os.Getenv("SOL_PRIVATE_KEY")
+	cfg.SolanaRPCURL = os.Getenv("SOLANA_RPC_URL")
+	if cfg.SolanaRPCURL == "" {
+		cfg.SolanaRPCURL = "https://api.mainnet-beta.solana.com"
+	}
+	cfg.HeliusWebhookSecret = os.Getenv("HELIUS_WEBHOOK_SECRET")
+
+	cfg.AutoBuyAmountUSD = 1.5
+	if v := os.Getenv("AUTO_BUY_AMOUNT_USD"); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && n > 0 {
+			cfg.AutoBuyAmountUSD = n
+		}
+	}
+	// Auto-buy requires an explicit opt-in AND a private key — either alone
+	// is not enough to start signing real transactions.
+	cfg.AutoBuyEnabled = strings.EqualFold(os.Getenv("AUTO_BUY_ENABLED"), "true") && cfg.SolPrivateKey != ""
 
 	// Normalise RenderURL: strip trailing slash so callers can always do cfg.RenderURL+"/app".
 	cfg.RenderURL = strings.TrimSuffix(cfg.RenderURL, "/")

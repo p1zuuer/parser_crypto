@@ -13,16 +13,18 @@ import (
 	"smart-cluster-bot/internal/config"
 	"smart-cluster-bot/internal/detector"
 	"smart-cluster-bot/internal/storage"
+	"smart-cluster-bot/internal/trading"
 )
 
 // rugCheckTimeout bounds every call to the RugCheck API. This is deliberately
 // short — a slow safety check must never delay or block alert delivery.
 const rugCheckTimeout = 4 * time.Second
 
+// autoBuyTimeout bounds the entire quote → sign → broadcast pipeline for a
+// single auto-buy attempt.
+const autoBuyTimeout = 15 * time.Second
+
 // RugCheckReport is our decode target for RugCheck's summary endpoint.
-// Field names are best-effort based on RugCheck's public summary schema;
-// unknown/absent fields simply decode to zero values rather than erroring,
-// so a schema drift degrades gracefully instead of crashing the broadcaster.
 type RugCheckReport struct {
 	Score           int    `json:"score"`
 	MintAuthority   string `json:"mintAuthority"`
@@ -41,26 +43,16 @@ type RugCheckReport struct {
 	} `json:"risks"`
 }
 
-// minSafeLPLockedPct is the minimum acceptable percentage of locked
-// liquidity across reported markets before we treat liquidity as "unlocked".
 const minSafeLPLockedPct = 50.0
 
 // checkRugCheck queries the RugCheck API for Solana tokens under a strict
-// timeout. Returns (safetyBadge, shouldBlock, error).
-//
-// Hard-blocking conditions (shouldBlock=true):
-//  1. Freeze authority present (non-empty, non-null) — token can be frozen.
-//  2. Token metadata is mutable — symbol/name/image can change post-launch.
-//  3. Liquidity is unlocked or locked below minSafeLPLockedPct.
-//  4. Any risk entry reports level "danger" or "critical".
-//
-// Non-Solana chains and API hiccups (timeout, non-200, malformed JSON, rate
-// limiting) never block — they degrade to an "UNVERIFIED" badge so the bot
-// keeps functioning through network flakiness rather than freezing alerts.
+// timeout. Returns (safetyLine, shouldBlock, error). Non-Solana chains and
+// API hiccups never block — they degrade to an "unverified" state so the
+// bot keeps functioning through network flakiness.
 func checkRugCheck(ctx context.Context, baseURL, chain, address string) (string, bool, error) {
 	c := strings.ToLower(chain)
 	if c != "solana" && c != "sol" {
-		return "🛡 AUTO-RUGCHECK: PASSED (Non-Solana Chain)", false, nil
+		return "RugCheck: passed (non-Solana chain)", false, nil
 	}
 
 	reqCtx, cancel := context.WithTimeout(ctx, rugCheckTimeout)
@@ -69,40 +61,34 @@ func checkRugCheck(ctx context.Context, baseURL, chain, address string) (string,
 	url := fmt.Sprintf("%s/tokens/%s/report/summary", strings.TrimSuffix(baseURL, "/"), address)
 	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, url, nil)
 	if err != nil {
-		return "🛡 AUTO-RUGCHECK: UNVERIFIED (Request Error)", false, err
+		return "RugCheck: unverified (request error)", false, err
 	}
 
 	client := &http.Client{Timeout: rugCheckTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		// Timeout, DNS failure, connection refused, etc. — never block on this.
-		return "🛡 AUTO-RUGCHECK: UNVERIFIED (API Timeout)", false, nil
+		return "RugCheck: unverified (API timeout)", false, nil
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusTooManyRequests {
-		return "🛡 AUTO-RUGCHECK: UNVERIFIED (Rate Limited 429)", false, nil
+		return "RugCheck: unverified (rate limited)", false, nil
 	}
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Sprintf("🛡 AUTO-RUGCHECK: UNVERIFIED (API Status %d)", resp.StatusCode), false, nil
+		return fmt.Sprintf("RugCheck: unverified (API status %d)", resp.StatusCode), false, nil
 	}
 
 	var report RugCheckReport
 	if err := json.NewDecoder(resp.Body).Decode(&report); err != nil {
-		return "🛡 AUTO-RUGCHECK: UNVERIFIED (Parse Error)", false, nil
+		return "RugCheck: unverified (parse error)", false, nil
 	}
 
-	// 1. Freeze authority enabled.
 	if strings.TrimSpace(report.FreezeAuthority) != "" {
-		return "🛑 RUGCHECK FAILED: FREEZE AUTHORITY ENABLED", true, nil
+		return "RugCheck: FAILED — freeze authority enabled", true, nil
 	}
-
-	// 2. Mutable metadata.
 	if report.TokenMeta.Mutable {
-		return "🛑 RUGCHECK FAILED: MUTABLE METADATA", true, nil
+		return "RugCheck: FAILED — mutable metadata", true, nil
 	}
-
-	// 3. Liquidity unlocked / below safe threshold.
 	if len(report.Markets) > 0 {
 		var maxLocked float64
 		for _, m := range report.Markets {
@@ -111,76 +97,80 @@ func checkRugCheck(ctx context.Context, baseURL, chain, address string) (string,
 			}
 		}
 		if maxLocked < minSafeLPLockedPct {
-			return fmt.Sprintf("🛑 RUGCHECK FAILED: LIQUIDITY %.0f%% LOCKED (MIN %.0f%%)", maxLocked, minSafeLPLockedPct), true, nil
+			return fmt.Sprintf("RugCheck: FAILED — only %.0f%% liquidity locked (min %.0f%%)", maxLocked, minSafeLPLockedPct), true, nil
 		}
 	}
-
-	// 4. Explicit danger/critical risk flags.
 	for _, risk := range report.Risks {
 		lvl := strings.ToLower(risk.Level)
 		if lvl == "danger" || lvl == "critical" {
-			return fmt.Sprintf("🛑 RUGCHECK FAILED: %s", strings.ToUpper(risk.Name)), true, nil
+			return fmt.Sprintf("RugCheck: FAILED — %s", risk.Name), true, nil
 		}
 	}
-
-	// Overall high score is an additional soft signal even without a named risk.
 	if report.Score > 5000 {
-		return fmt.Sprintf("🛑 RUGCHECK FAILED: HIGH RISK SCORE (%d)", report.Score), true, nil
+		return fmt.Sprintf("RugCheck: FAILED — high risk score (%d)", report.Score), true, nil
 	}
 
-	return "🛡 AUTO-RUGCHECK: PASSED", false, nil
+	return "RugCheck: passed", false, nil
 }
 
-// formatAlertMessage builds the rich HTML alert body sent to the admin.
-// All dynamic content is HTML-escaped before embedding to prevent Telegram
-// parse-mode panics on adversarial token names/symbols.
-func formatAlertMessage(alert detector.ClusterAlert, safetyLine string, isWhaleMatch bool) string {
-	chainEmo := chainEmoji(alert.Chain)
-	volStr := fmtFloat(alert.TotalVolumeUSD)
+// resultBuyer is implemented by trading.JupiterBuyer; declared locally so
+// the broadcaster can retrieve a transaction signature without importing
+// concrete trading types beyond the AutoBuyer interface.
+type resultBuyer interface {
+	BuyTokenWithResult(ctx context.Context, tokenAddress string, amountUSD float64) (string, error)
+}
+
+// formatAlertMessage builds the alert body sent to the admin. All dynamic
+// content is HTML-escaped before embedding to prevent Telegram parse-mode
+// panics on adversarial token names/symbols. Addresses are shown in full.
+func formatAlertMessage(alert detector.ClusterAlert, safetyLine string, isWhaleMatch bool, autoBuyLine string) string {
 	windowMin := alert.TimeWindowSeconds / 60
 	if windowMin < 1 {
 		windowMin = 1
 	}
-
 	avgEntry := alert.TotalVolumeUSD
 	if alert.BuyCount > 0 {
 		avgEntry = alert.TotalVolumeUSD / float64(alert.BuyCount)
 	}
 
-	entryBadge := "🟢 SAFE ENTRY (INITIAL ACCUMULATION)"
+	entryLine := "Entry: Safe (initial accumulation)"
 	if alert.TimeWindowSeconds > 120 {
-		entryBadge = "⚠️ LATE ENTRY — HIGH RISK"
+		entryLine = "Entry: Late — higher risk"
 	}
 
 	whaleLine := ""
 	if isWhaleMatch {
-		whaleLine = "\n🐋 <b>SEEDED WHALE MATCH!</b>"
+		whaleLine = "\nSeeded whale match!"
 	}
 
-	return fmt.Sprintf(
-		"<b>🚨 CLUSTER ALERT</b>%s\n\n"+
-			"%s <b>%s</b> | <code>%s</code>\n\n"+
+	body := fmt.Sprintf(
+		"Cluster Alert%s\n\n"+
+			"%s (%s)\n\n"+
 			"%s\n"+
 			"%s\n\n"+
-			"💰 Volume: <b>$%s</b>\n"+
-			"👛 Wallets: <b>%d</b>\n"+
-			"📊 Avg Entry: <b>$%s</b>\n"+
-			"⏱ Window: <b>%d min</b>\n"+
-			"📍 Lead Wallet: <code>%s</code>\n\n"+
-			"🔗 Contract:\n<code>%s</code>",
+			"Volume: $%s\n"+
+			"Wallets: %d\n"+
+			"Avg entry: $%s\n"+
+			"Time window: %d min\n"+
+			"Lead wallet: %s\n\n"+
+			"Contract: %s",
 		whaleLine,
-		chainEmo,
 		html.EscapeString(alert.TokenSymbol),
 		html.EscapeString(alert.Chain),
-		entryBadge,
+		entryLine,
 		safetyLine,
-		volStr,
+		fmtFloat(alert.TotalVolumeUSD),
 		alert.BuyCount,
 		fmtFloat(avgEntry),
 		windowMin,
-		html.EscapeString(maskAddr(alert.LeadWallet)),
+		html.EscapeString(alert.LeadWallet),
 		alert.TokenAddress,
 	)
+
+	if autoBuyLine != "" {
+		body += "\n\n" + autoBuyLine
+	}
+	return body
 }
 
 // alertKeyboard builds the interactive inline keyboard attached to every alert.
@@ -204,29 +194,16 @@ func alertKeyboard(alert detector.ClusterAlert) *InlineKeyboardMarkup {
 	return &InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
-func chainEmoji(chain string) string {
-	switch strings.ToLower(chain) {
-	case "ethereum", "eth":
-		return "⬡"
-	case "solana", "sol":
-		return "◎"
-	case "base":
-		return "🔵"
-	case "bsc", "bnb":
-		return "🟡"
-	default:
-		return "🌐"
-	}
-}
-
 // StartAlertBroadcaster runs as a goroutine that consumes alerts from
-// alertsChan and delivers them to the single admin chat. Wrapped in panic
+// alertsChan and delivers them to the single admin chat, triggering an
+// auto-buy for qualifying Solana clusters along the way. Wrapped in panic
 // recovery — a bad alert or downstream failure must never kill the process.
 func StartAlertBroadcaster(
 	ctx context.Context,
 	client *Client,
 	store *storage.Storage,
 	cfg *config.Config,
+	buyer trading.AutoBuyer,
 	alertsChan <-chan detector.ClusterAlert,
 ) {
 	go func() {
@@ -243,25 +220,22 @@ func StartAlertBroadcaster(
 				if !ok {
 					return
 				}
-				safeBroadcastAlert(ctx, client, store, cfg, alert)
+				safeBroadcastAlert(ctx, client, store, cfg, buyer, alert)
 			}
 		}
 	}()
 }
 
-// safeBroadcastAlert wraps broadcastAlert with its own recover so a panic
-// processing one alert doesn't kill the broadcaster goroutine for subsequent
-// alerts (the outer recover only protects the loop from a single fatal exit).
-func safeBroadcastAlert(ctx context.Context, client *Client, store *storage.Storage, cfg *config.Config, alert detector.ClusterAlert) {
+func safeBroadcastAlert(ctx context.Context, client *Client, store *storage.Storage, cfg *config.Config, buyer trading.AutoBuyer, alert detector.ClusterAlert) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[PANIC RECOVER] broadcastAlert recovered: %v", r)
 		}
 	}()
-	broadcastAlert(ctx, client, store, cfg, alert)
+	broadcastAlert(ctx, client, store, cfg, buyer, alert)
 }
 
-func broadcastAlert(ctx context.Context, client *Client, store *storage.Storage, cfg *config.Config, alert detector.ClusterAlert) {
+func broadcastAlert(ctx context.Context, client *Client, store *storage.Storage, cfg *config.Config, buyer trading.AutoBuyer, alert detector.ClusterAlert) {
 	rugCheckBase := "https://api.rugcheck.xyz/v1"
 	if cfg != nil && cfg.RugCheckBaseURL != "" {
 		rugCheckBase = cfg.RugCheckBaseURL
@@ -275,6 +249,7 @@ func broadcastAlert(ctx context.Context, client *Client, store *storage.Storage,
 		log.Printf("[BROADCASTER] blocked dangerous token %s (%s): %s", alert.TokenSymbol, alert.TokenAddress, safetyLine)
 		return
 	}
+	rugCheckPassed := !shouldBlock
 
 	if err := store.SaveCluster(
 		alert.TokenAddress, alert.TokenSymbol, alert.Chain,
@@ -291,16 +266,50 @@ func broadcastAlert(ctx context.Context, client *Client, store *storage.Storage,
 		}
 	}
 
+	// Auto-buy: only for Solana clusters that passed RugCheck, and only if
+	// the operator has actually enabled it with a configured wallet.
+	autoBuyLine := ""
+	if rugCheckPassed && cfg != nil && cfg.AutoBuyEnabled && strings.EqualFold(alert.Chain, "solana") {
+		autoBuyLine = attemptAutoBuy(ctx, buyer, cfg, alert)
+	}
+
 	if cfg == nil || cfg.AdminChatID == 0 {
 		log.Printf("[BROADCASTER] no AdminChatID configured — dropping alert for %s", alert.TokenSymbol)
 		return
 	}
 
-	msg := formatAlertMessage(alert, safetyLine, isWhaleMatch)
+	msg := formatAlertMessage(alert, safetyLine, isWhaleMatch, autoBuyLine)
 	kb := alertKeyboard(alert)
 	if err := client.SendMessageWithKeyboard(cfg.AdminChatID, msg, kb); err != nil {
 		log.Printf("[BROADCASTER] send to admin %d: %v", cfg.AdminChatID, err)
 	}
+}
+
+// attemptAutoBuy runs the configured AutoBuyer against the alert's token and
+// returns a human-readable result line to append to the Telegram alert.
+// Never panics or blocks the broadcaster beyond autoBuyTimeout.
+func attemptAutoBuy(ctx context.Context, buyer trading.AutoBuyer, cfg *config.Config, alert detector.ClusterAlert) string {
+	if buyer == nil {
+		return ""
+	}
+	buyCtx, cancel := context.WithTimeout(ctx, autoBuyTimeout)
+	defer cancel()
+
+	if rb, ok := buyer.(resultBuyer); ok {
+		sig, err := rb.BuyTokenWithResult(buyCtx, alert.TokenAddress, cfg.AutoBuyAmountUSD)
+		if err != nil {
+			log.Printf("[AUTOBUY] failed for %s: %v", alert.TokenAddress, err)
+			return fmt.Sprintf("Auto-Buy: FAILED — %v", err)
+		}
+		log.Printf("[AUTOBUY] success for %s: tx %s", alert.TokenAddress, sig)
+		return fmt.Sprintf("Auto-Buy: SUCCESS\nTx: %s", sig)
+	}
+
+	if err := buyer.BuyToken(buyCtx, alert.TokenAddress, cfg.AutoBuyAmountUSD); err != nil {
+		log.Printf("[AUTOBUY] failed for %s: %v", alert.TokenAddress, err)
+		return fmt.Sprintf("Auto-Buy: FAILED — %v", err)
+	}
+	return "Auto-Buy: SUCCESS"
 }
 
 // StartDailyDigest schedules a daily summary message sent to the admin at 09:00 UTC.
@@ -314,7 +323,6 @@ func StartDailyDigest(ctx context.Context, client *Client, store *storage.Storag
 		for {
 			next := nextDailyDigestTime()
 			log.Printf("[DIGEST] next daily digest at %s", next.Format(time.RFC3339))
-
 			select {
 			case <-ctx.Done():
 				return
@@ -366,47 +374,47 @@ func sendDailyDigest(client *Client, store *storage.Storage, cfg *config.Config)
 	}
 
 	var sb strings.Builder
-	sb.WriteString("<b>📰 Daily Digest — Solo Sniper Station</b>\n")
-	sb.WriteString(fmt.Sprintf("🗓 %s UTC\n\n", time.Now().UTC().Format("02 Jan 2006")))
+	sb.WriteString("Daily Digest — Solo Sniper Station\n")
+	fmt.Fprintf(&sb, "%s UTC\n\n", time.Now().UTC().Format("02 Jan 2006"))
 
-	sb.WriteString("📊 <b>24h Summary:</b>\n")
+	sb.WriteString("24h Summary:\n")
 	if stats != nil {
-		sb.WriteString(fmt.Sprintf(
-			"• Clusters: <b>%d</b>\n• Volume: <b>$%s</b>\n• Top Token: <b>%s</b>\n• Top Chain: <b>%s</b>\n\n",
+		fmt.Fprintf(&sb,
+			"Clusters: %d\nVolume: $%s\nTop Token: %s\nTop Chain: %s\n\n",
 			stats.TotalClusters,
 			html.EscapeString(fmtFloat(stats.TotalVolumeUSD)),
 			html.EscapeString(or(stats.TopToken, "—")),
 			html.EscapeString(or(stats.TopChain, "—")),
-		))
+		)
 	} else {
-		sb.WriteString("<i>No data</i>\n\n")
+		sb.WriteString("No data\n\n")
 	}
 
 	if len(clusters) > 0 {
-		sb.WriteString("🔥 <b>Top Clusters:</b>\n")
+		sb.WriteString("Top Clusters:\n")
 		for i, c := range clusters {
-			sb.WriteString(fmt.Sprintf(
-				"%d. <b>%s</b> (%s) — $%s · %d wallets\n<code>%s</code>\n",
+			fmt.Fprintf(&sb,
+				"%d. %s (%s) — $%s, %d wallets\n%s\n",
 				i+1,
 				html.EscapeString(c.TokenSymbol),
 				html.EscapeString(c.Chain),
 				html.EscapeString(fmtFloat(c.TotalVolumeUSD)),
 				c.BuyCount,
 				c.TokenAddress,
-			))
+			)
 		}
 		sb.WriteString("\n")
 	}
 
 	if len(hotWallets) > 0 {
-		sb.WriteString("🔥 <b>Hot Wallets:</b>\n")
+		sb.WriteString("Hot Wallets:\n")
 		for _, w := range hotWallets {
-			sb.WriteString(fmt.Sprintf(
-				"• <code>%s</code> — %d clusters · $%s\n",
-				html.EscapeString(maskAddr(w.WalletAddress)),
+			fmt.Fprintf(&sb,
+				"%s — %d clusters, $%s\n",
+				html.EscapeString(w.WalletAddress),
 				w.ClusterCount,
 				html.EscapeString(fmtFloat(w.TotalVolumeUSD)),
-			))
+			)
 		}
 	}
 
