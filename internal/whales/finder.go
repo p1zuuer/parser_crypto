@@ -394,9 +394,11 @@ func (f *Finder) formatReport(candidates []Candidate) string {
 	return sb.String()
 }
 
-// StartScheduled launches the finder on a daily schedule at the given UTC hour.
+// StartScheduled launches the finder on an hourly schedule.
 // Also runs once immediately at startup so you get a result right away.
-func StartScheduled(ctx context.Context, dailyUTCHour int, notify func(string)) {
+// Manual on-demand runs (via Telegram button) are independent and always
+// allowed — they don't reset or conflict with the hourly timer.
+func StartScheduled(ctx context.Context, notify func(string)) {
 	f := NewFinder(notify)
 
 	go func() {
@@ -406,28 +408,20 @@ func StartScheduled(ctx context.Context, dailyUTCHour int, notify func(string)) 
 			}
 		}()
 
-		// Immediate first run
+		// Immediate first run on startup
 		f.Run(ctx)
 
-		for {
-			next := nextRunTime(dailyUTCHour)
-			log.Printf("[WHALE FINDER] next run at %s", next.Format(time.RFC3339))
+		ticker := time.NewTicker(1 * time.Hour)
+		defer ticker.Stop()
 
+		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(time.Until(next)):
+			case <-ticker.C:
+				log.Printf("[WHALE FINDER] hourly run starting")
 				f.Run(ctx)
 			}
 		}
 	}()
-}
-
-func nextRunTime(utcHour int) time.Time {
-	now := time.Now().UTC()
-	next := time.Date(now.Year(), now.Month(), now.Day(), utcHour, 0, 0, 0, time.UTC)
-	if !next.After(now) {
-		next = next.Add(24 * time.Hour)
-	}
-	return next
 }

@@ -134,9 +134,9 @@ func main() {
 	telegram.StartAlertBroadcaster(ctx, tgClient, db, cfg, buyer, seller, engine.AlertsChan)
 	telegram.StartDailyDigest(ctx, tgClient, db, cfg)
 
-	// ── 9. Shadow Whale Finder (daily at 08:00 UTC) ────────────────────────────
+	// ── 9. Shadow Whale Finder (runs every hour + on-demand via Telegram button) ──
 	whaleFinder := whales.NewFinder(notify)
-	whales.StartScheduled(ctx, 8, notify)
+	whales.StartScheduled(ctx, notify)
 	// on-demand trigger wired into the Telegram handler
 	onDemandFinder := func() { whaleFinder.Run(ctx) }
 
