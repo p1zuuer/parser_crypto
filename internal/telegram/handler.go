@@ -89,9 +89,10 @@ func (h *WebhookHandler) handleMessage(msg *Message) {
 	switch {
 	case text == "/start":
 		h.sendStartMenu(chatID)
-	case text == "/whales" || text == "Manage Whales":
-		h.sendWhalesMenu(chatID)
 	case strings.HasPrefix(text, "/addwhale"):
+		h.handleAddWhaleCommand(chatID, text)
+	case text == "/whales":
+		h.sendWhalesMenu(chatID)
 	case text == "/clusters":
 		h.sendClustersMenu(chatID)
 	case text == "/settings":
@@ -225,12 +226,9 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 	header := "Manage Whales\n\n"
 
 	if err != nil || len(wallets) == 0 {
-		body := header + "No whales tracked yet. Use Find Shadow Whales or add one manually."
+		body := header + "No whales tracked yet.\n\nAdd one: /addwhale &lt;address&gt; [note]"
 		return body, &InlineKeyboardMarkup{
-			InlineKeyboard: [][]InlineKeyboardButton{
-				{{Text: "➕ Add Whale", CallbackData: "cb:whale:add_prompt"}},
-				{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}},
-			},
+			InlineKeyboard: [][]InlineKeyboardButton{{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}}},
 		}
 	}
 
@@ -240,7 +238,7 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 
 	var rows [][]InlineKeyboardButton
 	for _, w := range wallets {
-		fmt.Fprintf(&sb, "<code>%s</code>", html.EscapeString(w.WalletAddress))
+		fmt.Fprintf(&sb, "%s", html.EscapeString(w.WalletAddress))
 		if w.Note != "" {
 			fmt.Fprintf(&sb, " — %s", html.EscapeString(w.Note))
 		}
@@ -249,18 +247,15 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 			{Text: "🗑 Remove " + shortLabel(w.WalletAddress), CallbackData: fmt.Sprintf("cb:whale:rm:%d", w.ID)},
 		})
 	}
-	sb.WriteString("\nAdd more: /addwhale <address> [note]")
-	rows = append(rows, []InlineKeyboardButton{
-		{Text: "➕ Add Whale", CallbackData: "cb:whale:add_prompt"},
-		{Text: "⬅️ Main Menu", CallbackData: "cb:menu"},
-	})
+	sb.WriteString("\nAdd more: /addwhale &lt;address&gt; [note]")
+	rows = append(rows, []InlineKeyboardButton{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}})
 	return sb.String(), &InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
 func (h *WebhookHandler) handleAddWhaleCommand(chatID int64, text string) {
 	parts := strings.Fields(text)
 	if len(parts) < 2 {
-		h.client.SendMessage(chatID, "Usage: /addwhale <address> [note]")
+		h.client.SendMessage(chatID, "Usage: /addwhale &lt;address&gt; [note]")
 		return
 	}
 	addr := parts[1]
@@ -442,16 +437,6 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 		h.editSettingsMenu(chatID, msgID)
 	case strings.HasPrefix(data, "cb:whale:rm:"):
 		h.handleRemoveWhale(chatID, msgID, data)
-	case data == "cb:whale:add_prompt":
-		body := "To add a new whale manually, send the command:\n\n/addwhale <address> [note]"
-		kb := &InlineKeyboardMarkup{
-			InlineKeyboard: [][]InlineKeyboardButton{
-				{{Text: "⬅️ Back to Whales", CallbackData: "cb:whales"}},
-			},
-		}
-		if err := h.client.EditMessageText(chatID, msgID, body, kb); err != nil {
-			log.Printf("[HANDLER] cb:whale:add_prompt edit: %v", err)
-		}
 	case strings.HasPrefix(data, "cb:whale:add:"):
 		addr := strings.TrimPrefix(data, "cb:whale:add:")
 		if err := h.storage.AddSmartWallet(addr, "Added from alert"); err != nil {
