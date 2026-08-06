@@ -29,7 +29,7 @@ func TestInitDB_Fresh(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSniperSettings failed: %v", err)
 	}
-	if st.MinWallets != 2 || st.MinVolumeUSD != 200 || st.WindowSeconds != 180 {
+	if st.MinWallets != 3 || st.MinVolumeUSD != 1500 || st.WindowSeconds != 120 {
 		t.Fatalf("unexpected default settings: %+v", st)
 	}
 
