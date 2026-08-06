@@ -21,17 +21,18 @@ import (
 // single-admin bot — every update is checked against config.AdminChatID and
 // anything else is silently dropped.
 type WebhookHandler struct {
-	client  *Client
-	storage *storage.Storage
-	config  *config.Config
-	i18n    *i18n.Bundle
-	engine  *detector.ClusterEngine
+	client      *Client
+	storage     *storage.Storage
+	config      *config.Config
+	i18n        *i18n.Bundle
+	engine      *detector.ClusterEngine
+	whaleFinder func() // triggers an on-demand finder run
 }
 
 // NewWebhookHandler wires all dependencies, including the live cluster engine
 // so Sniper Settings changes take effect immediately.
-func NewWebhookHandler(client *Client, store *storage.Storage, cfg *config.Config, bundle *i18n.Bundle, engine *detector.ClusterEngine) *WebhookHandler {
-	return &WebhookHandler{client: client, storage: store, config: cfg, i18n: bundle, engine: engine}
+func NewWebhookHandler(client *Client, store *storage.Storage, cfg *config.Config, bundle *i18n.Bundle, engine *detector.ClusterEngine, whaleFinder func()) *WebhookHandler {
+	return &WebhookHandler{client: client, storage: store, config: cfg, i18n: bundle, engine: engine, whaleFinder: whaleFinder}
 }
 
 func (h *WebhookHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -133,6 +134,8 @@ func (h *WebhookHandler) mainMenuKB() *InlineKeyboardMarkup {
 	rows := [][]InlineKeyboardButton{
 		{{Text: "📡 Active Clusters", CallbackData: "cb:clusters"}},
 		{{Text: "🐋 Manage Whales", CallbackData: "cb:whales"}},
+		{{Text: "💼 Open Positions", CallbackData: "cb:positions"}},
+		{{Text: "🔍 Find Shadow Whales", CallbackData: "cb:findwhales"}},
 		{{Text: "⚙️ Sniper Settings", CallbackData: "cb:settings"}},
 	}
 	if u := h.webAppURL(); u != "" {
@@ -223,7 +226,7 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 	header := "Manage Whales\n\n"
 
 	if err != nil || len(wallets) == 0 {
-		body := header + "No whales tracked yet.\n\nAdd one: /addwhale <code>address</code> [note]"
+		body := header + "No whales tracked yet.\n\nAdd one: /addwhale <address> [note]"
 		return body, &InlineKeyboardMarkup{
 			InlineKeyboard: [][]InlineKeyboardButton{{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}}},
 		}
@@ -235,7 +238,7 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 
 	var rows [][]InlineKeyboardButton
 	for _, w := range wallets {
-		fmt.Fprintf(&sb, "<code>%s</code>", html.EscapeString(w.WalletAddress))
+		fmt.Fprintf(&sb, "%s", html.EscapeString(w.WalletAddress))
 		if w.Note != "" {
 			fmt.Fprintf(&sb, " — %s", html.EscapeString(w.Note))
 		}
@@ -244,7 +247,7 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 			{Text: "🗑 Remove " + shortLabel(w.WalletAddress), CallbackData: fmt.Sprintf("cb:whale:rm:%d", w.ID)},
 		})
 	}
-	sb.WriteString("\nAdd more: /addwhale <code>address</code> [note]")
+	sb.WriteString("\nAdd more: /addwhale <address> [note]")
 	rows = append(rows, []InlineKeyboardButton{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}})
 	return sb.String(), &InlineKeyboardMarkup{InlineKeyboard: rows}
 }
@@ -252,7 +255,7 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 func (h *WebhookHandler) handleAddWhaleCommand(chatID int64, text string) {
 	parts := strings.Fields(text)
 	if len(parts) < 2 {
-		h.client.SendMessage(chatID, "Usage: /addwhale <code>address</code> [note]")
+		h.client.SendMessage(chatID, "Usage: /addwhale <address> [note]")
 		return
 	}
 	addr := parts[1]
@@ -263,7 +266,7 @@ func (h *WebhookHandler) handleAddWhaleCommand(chatID int64, text string) {
 		return
 	}
 	reply := fmt.Sprintf(
-		"Whale added.\n\n<code>%s</code>\nNote: %s",
+		"Whale added.\n\n%s\nNote: %s",
 		html.EscapeString(addr), html.EscapeString(or(note, "—")),
 	)
 	h.client.SendMessageWithKeyboard(chatID, reply, &InlineKeyboardMarkup{
@@ -426,6 +429,10 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 		h.editClustersMenu(chatID, msgID)
 	case data == "cb:whales":
 		h.editWhalesMenu(chatID, msgID)
+	case data == "cb:positions":
+		h.editPositionsMenu(chatID, msgID)
+	case data == "cb:findwhales":
+		h.handleFindWhales(chatID, msgID)
 	case data == "cb:settings":
 		h.editSettingsMenu(chatID, msgID)
 	case strings.HasPrefix(data, "cb:whale:rm:"):
@@ -452,6 +459,67 @@ func (h *WebhookHandler) engineThresholds() (int, float64, time.Duration) {
 
 func secondsToDuration(seconds int) time.Duration {
 	return time.Duration(seconds) * time.Second
+}
+
+// ── Open Positions ─────────────────────────────────────────────────────────────
+
+func (h *WebhookHandler) editPositionsMenu(chatID int64, msgID int) {
+	body, kb := h.buildPositionsContent()
+	if err := h.client.EditMessageText(chatID, msgID, body, kb); err != nil {
+		log.Printf("[HANDLER] editPositionsMenu %d/%d: %v", chatID, msgID, err)
+	}
+}
+
+func (h *WebhookHandler) buildPositionsContent() (string, *InlineKeyboardMarkup) {
+	positions, err := h.storage.GetOpenPositions()
+	back := &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}}},
+	}
+
+	if err != nil {
+		return "Error loading positions.", back
+	}
+	if len(positions) == 0 {
+		return "Open Positions\n\nNo open positions. Auto-buy will create entries here.", back
+	}
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "Open Positions (%d)\n\n", len(positions))
+	for _, p := range positions {
+		status := "🟡 Open"
+		if p.Status == "tp_partial" {
+			status = "🟢 TP Hit — Riding"
+		}
+		fmt.Fprintf(&sb,
+			"%s %s\n"+
+				"Entry: $%.6f\n"+
+				"Size: $%.2f\n"+
+				"TP: +%.0f%% | SL: -%.0f%%\n"+
+				"Contract: %s\n\n",
+			status, p.TokenSymbol,
+			p.EntryPriceUSD,
+			p.BuyAmountUSD,
+			p.TakeProfitPct, p.StopLossPct,
+			p.TokenAddress,
+		)
+	}
+	return sb.String(), back
+}
+
+// ── Find Shadow Whales ────────────────────────────────────────────────────────
+
+func (h *WebhookHandler) handleFindWhales(chatID int64, msgID int) {
+	// Acknowledge immediately with a "scanning" message
+	scanning := "Scanning DexScreener + GMGN for shadow whale candidates...\n\nThis takes 30–60 seconds. Results will arrive as a separate message."
+	if err := h.client.EditMessageText(chatID, msgID, scanning, &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}}},
+	}); err != nil {
+		log.Printf("[HANDLER] handleFindWhales edit: %v", err)
+	}
+
+	if h.whaleFinder != nil {
+		go h.whaleFinder()
+	}
 }
 
 // ── URL helpers ────────────────────────────────────────────────────────────────

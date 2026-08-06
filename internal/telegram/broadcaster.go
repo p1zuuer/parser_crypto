@@ -204,6 +204,7 @@ func StartAlertBroadcaster(
 	store *storage.Storage,
 	cfg *config.Config,
 	buyer trading.AutoBuyer,
+	seller *trading.Seller,
 	alertsChan <-chan detector.ClusterAlert,
 ) {
 	go func() {
@@ -220,22 +221,22 @@ func StartAlertBroadcaster(
 				if !ok {
 					return
 				}
-				safeBroadcastAlert(ctx, client, store, cfg, buyer, alert)
+				safeBroadcastAlert(ctx, client, store, cfg, buyer, seller, alert)
 			}
 		}
 	}()
 }
 
-func safeBroadcastAlert(ctx context.Context, client *Client, store *storage.Storage, cfg *config.Config, buyer trading.AutoBuyer, alert detector.ClusterAlert) {
+func safeBroadcastAlert(ctx context.Context, client *Client, store *storage.Storage, cfg *config.Config, buyer trading.AutoBuyer, seller *trading.Seller, alert detector.ClusterAlert) {
 	defer func() {
 		if r := recover(); r != nil {
 			log.Printf("[PANIC RECOVER] broadcastAlert recovered: %v", r)
 		}
 	}()
-	broadcastAlert(ctx, client, store, cfg, buyer, alert)
+	broadcastAlert(ctx, client, store, cfg, buyer, seller, alert)
 }
 
-func broadcastAlert(ctx context.Context, client *Client, store *storage.Storage, cfg *config.Config, buyer trading.AutoBuyer, alert detector.ClusterAlert) {
+func broadcastAlert(ctx context.Context, client *Client, store *storage.Storage, cfg *config.Config, buyer trading.AutoBuyer, seller *trading.Seller, alert detector.ClusterAlert) {
 	rugCheckBase := "https://api.rugcheck.xyz/v1"
 	if cfg != nil && cfg.RugCheckBaseURL != "" {
 		rugCheckBase = cfg.RugCheckBaseURL
@@ -270,7 +271,7 @@ func broadcastAlert(ctx context.Context, client *Client, store *storage.Storage,
 	// the operator has actually enabled it with a configured wallet.
 	autoBuyLine := ""
 	if rugCheckPassed && cfg != nil && cfg.AutoBuyEnabled && strings.EqualFold(alert.Chain, "solana") {
-		autoBuyLine = attemptAutoBuy(ctx, buyer, cfg, alert)
+		autoBuyLine = attemptAutoBuy(ctx, buyer, seller, cfg, alert)
 	}
 
 	if cfg == nil || cfg.AdminChatID == 0 {
@@ -288,7 +289,7 @@ func broadcastAlert(ctx context.Context, client *Client, store *storage.Storage,
 // attemptAutoBuy runs the configured AutoBuyer against the alert's token and
 // returns a human-readable result line to append to the Telegram alert.
 // Never panics or blocks the broadcaster beyond autoBuyTimeout.
-func attemptAutoBuy(ctx context.Context, buyer trading.AutoBuyer, cfg *config.Config, alert detector.ClusterAlert) string {
+func attemptAutoBuy(ctx context.Context, buyer trading.AutoBuyer, seller *trading.Seller, cfg *config.Config, alert detector.ClusterAlert) string {
 	if buyer == nil {
 		return ""
 	}
@@ -302,6 +303,10 @@ func attemptAutoBuy(ctx context.Context, buyer trading.AutoBuyer, cfg *config.Co
 			return fmt.Sprintf("Auto-Buy: FAILED — %v", err)
 		}
 		log.Printf("[AUTOBUY] success for %s: tx %s", alert.TokenAddress, sig)
+		// Record the position so the seller goroutine can monitor TP/SL.
+		if seller != nil {
+			seller.RecordBuy(ctx, alert.TokenAddress, alert.TokenSymbol, alert.Chain, sig, cfg.AutoBuyAmountUSD)
+		}
 		return fmt.Sprintf("Auto-Buy: SUCCESS\nTx: %s", sig)
 	}
 

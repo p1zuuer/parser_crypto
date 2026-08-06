@@ -28,6 +28,7 @@ import (
 	"smart-cluster-bot/internal/storage"
 	"smart-cluster-bot/internal/telegram"
 	"smart-cluster-bot/internal/trading"
+	"smart-cluster-bot/internal/whales"
 	"smart-cluster-bot/web"
 )
 
@@ -104,29 +105,46 @@ func main() {
 
 	ctx := context.Background()
 
-	// ── 7. Auto-buy backend ─────────────────────────────────────────────────────
+	// ── 7. Auto-buy backend + seller ───────────────────────────────────────────
 	var buyer trading.AutoBuyer = trading.NoopBuyer{}
+	var seller *trading.Seller
+
+	notify := func(msg string) {
+		if err := tgClient.SendMessage(cfg.AdminChatID, msg); err != nil {
+			log.Printf("[NOTIFY] send to admin: %v", err)
+		}
+	}
+
 	if cfg.AutoBuyEnabled {
 		jupiterBuyer, err := trading.NewJupiterBuyer(cfg.SolPrivateKey, cfg.SolanaRPCURL)
 		if err != nil {
 			log.Printf("WARNING: auto-buy requested but wallet init failed, falling back to Noop: %v", err)
 		} else {
 			buyer = jupiterBuyer
-			log.Printf("INFO: auto-buy ENABLED — live trades will execute for $%.2f per Solana cluster", cfg.AutoBuyAmountUSD)
+			seller = trading.NewSeller(jupiterBuyer, db, notify)
+			seller.Start(ctx)
+			log.Printf("INFO: auto-buy ENABLED — $%.2f per Solana cluster, TP +%.0f%% / SL -%.0f%%",
+				cfg.AutoBuyAmountUSD, trading.DefaultTakeProfitPct, trading.DefaultStopLossPct)
 		}
 	} else {
 		log.Printf("INFO: auto-buy disabled (set AUTO_BUY_ENABLED=true and SOL_PRIVATE_KEY to enable)")
 	}
 
 	// ── 8. Alert broadcaster + daily digest ────────────────────────────────────
-	telegram.StartAlertBroadcaster(ctx, tgClient, db, cfg, buyer, engine.AlertsChan)
+	telegram.StartAlertBroadcaster(ctx, tgClient, db, cfg, buyer, seller, engine.AlertsChan)
 	telegram.StartDailyDigest(ctx, tgClient, db, cfg)
+
+	// ── 9. Shadow Whale Finder (daily at 08:00 UTC) ────────────────────────────
+	whaleFinder := whales.NewFinder(notify)
+	whales.StartScheduled(ctx, 8, notify)
+	// on-demand trigger wired into the Telegram handler
+	onDemandFinder := func() { whaleFinder.Run(ctx) }
 
 	// ── 9. Background pruner ────────────────────────────────────────────────────
 	startPruner(ctx, db)
 
 	// ── 10. HTTP routes ─────────────────────────────────────────────────────────
-	webhookHandler := telegram.NewWebhookHandler(tgClient, db, cfg, bundle, engine)
+	webhookHandler := telegram.NewWebhookHandler(tgClient, db, cfg, bundle, engine, onDemandFinder)
 	heliusHandler := dex.NewHeliusHandler(engine, cfg.HeliusWebhookSecret)
 
 	mux := http.NewServeMux()

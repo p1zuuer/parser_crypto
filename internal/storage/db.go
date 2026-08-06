@@ -146,6 +146,9 @@ func InitDB(dbPath string) (*Storage, error) {
 	if err := s.ensureSettingsRow(); err != nil {
 		return nil, fmt.Errorf("storage: ensure settings row: %w", err)
 	}
+	if err := s.migratePositions(); err != nil {
+		return nil, fmt.Errorf("storage: migrate positions: %w", err)
+	}
 	return s, nil
 }
 
