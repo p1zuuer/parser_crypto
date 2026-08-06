@@ -240,7 +240,7 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 
 	var rows [][]InlineKeyboardButton
 	for _, w := range wallets {
-		fmt.Fprintf(&sb, "%s", html.EscapeString(w.WalletAddress))
+		fmt.Fprintf(&sb, "<code>%s</code>", html.EscapeString(w.WalletAddress))
 		if w.Note != "" {
 			fmt.Fprintf(&sb, " — %s", html.EscapeString(w.Note))
 		}
