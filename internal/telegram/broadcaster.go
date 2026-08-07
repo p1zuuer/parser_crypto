@@ -156,7 +156,7 @@ func formatAlertMessage(alert detector.ClusterAlert, safetyLine string, isWhaleM
 			"Avg entry: $%s\n"+
 			"Time window: %d min\n"+
 			"Lead wallet: %s\n\n"+
-			"Contract: %s",
+			"Contract: <code>%s</code>",
 		whaleLine,
 		html.EscapeString(alert.TokenSymbol),
 		html.EscapeString(alert.Chain),
@@ -167,7 +167,7 @@ func formatAlertMessage(alert detector.ClusterAlert, safetyLine string, isWhaleM
 		fmtFloat(avgEntry),
 		windowMin,
 		html.EscapeString(alert.LeadWallet),
-		alert.TokenAddress,
+		html.EscapeString(alert.TokenAddress),
 	)
 
 	if autoBuyLine != "" {
@@ -448,13 +448,13 @@ func sendDailyDigest(client *Client, store *storage.Storage, cfg *config.Config)
 		sb.WriteString("Top Clusters:\n")
 		for i, c := range clusters {
 			fmt.Fprintf(&sb,
-				"%d. %s (%s) — $%s, %d wallets\n%s\n",
+				"%d. %s (%s) — $%s, %d wallets\n<code>%s</code>\n",
 				i+1,
 				html.EscapeString(c.TokenSymbol),
 				html.EscapeString(c.Chain),
 				html.EscapeString(fmtFloat(c.TotalVolumeUSD)),
 				c.BuyCount,
-				c.TokenAddress,
+				html.EscapeString(c.TokenAddress),
 			)
 		}
 		sb.WriteString("\n")
@@ -464,7 +464,7 @@ func sendDailyDigest(client *Client, store *storage.Storage, cfg *config.Config)
 		sb.WriteString("Hot Wallets:\n")
 		for _, w := range hotWallets {
 			fmt.Fprintf(&sb,
-				"%s — %d clusters, $%s\n",
+				"<code>%s</code> — %d clusters, $%s\n",
 				html.EscapeString(w.WalletAddress),
 				w.ClusterCount,
 				html.EscapeString(fmtFloat(w.TotalVolumeUSD)),

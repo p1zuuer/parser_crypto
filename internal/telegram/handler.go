@@ -215,12 +215,12 @@ func (h *WebhookHandler) buildClustersContent() (string, *InlineKeyboardMarkup) 
 		sb.WriteString("Recent clusters:\n\n")
 		for _, c := range clusters {
 			fmt.Fprintf(&sb,
-				"%s (%s)\nVolume: $%s — Buys: %d\nContract: %s\n\n",
+				"%s (%s)\nVolume: $%s — Buys: %d\nContract: <code>%s</code>\n\n",
 				html.EscapeString(c.TokenSymbol),
 				html.EscapeString(c.Chain),
 				fmtFloat(c.TotalVolumeUSD),
 				c.BuyCount,
-				c.TokenAddress,
+				html.EscapeString(c.TokenAddress),
 			)
 		}
 	}
@@ -630,12 +630,12 @@ func (h *WebhookHandler) buildPositionsContent() (string, *InlineKeyboardMarkup)
 				"Entry: $%.6f\n"+
 				"Size: $%.2f\n"+
 				"TP: +%.0f%% | SL: -%.0f%%\n"+
-				"Contract: %s\n\n",
-			status, p.TokenSymbol,
+				"Contract: <code>%s</code>\n\n",
+			status, html.EscapeString(p.TokenSymbol),
 			p.EntryPriceUSD,
 			p.BuyAmountUSD,
 			p.TakeProfitPct, p.StopLossPct,
-			p.TokenAddress,
+			html.EscapeString(p.TokenAddress),
 		)
 	}
 	return sb.String(), back
