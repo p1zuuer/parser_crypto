@@ -33,16 +33,17 @@ const (
 	httpTimeout = 8 * time.Second
 
 	// Shadow whale sizing criteria
-	minBuyUSD    = 100.0
-	maxBuyUSD    = 1_000.0
-	minWinRate   = 0.70 // 70%
-	maxWinRate   = 0.85 // 85% — above this is likely a bot or inside info
-	minTrades30d = 20   // rules out lucky one-hit-wonders
-	maxTrades30d = 500  // above this is likely an MEV bot
+	minBuyUSD    = 10.0
+	maxBuyUSD    = 50_000.0
+	minWinRate   = 0.50    // 50%
+	maxWinRate   = 1.00    // 100%
+	minTrades30d = 10      // rules out lucky one-hit-wonders
+	maxTrades30d = 2_000   // allows high-activity wallets
+	minPnkanUSD  = 3_000.0 // $3,000 over 7 days (or 30d total PnL >= $3k)
 
 	// Minimum seconds after token creation before a buy is considered
 	// "not a sniper". Buys within 2 seconds of launch = sniper bot.
-	minSecondsFromLaunch = 2
+	minSecondsFromLaunch = 0
 )
 
 // Candidate is a wallet that passed all shadow whale filters and is ready
@@ -315,10 +316,8 @@ func (f *Finder) evaluateWallet(ctx context.Context, wallet string) (Candidate, 
 		}
 	}
 
-	// ── Filter 2: not already crowded / publicly copy-traded ──
-	if d.CopyTradingCount > 500 {
-		return Candidate{}, false, nil
-	}
+	// ── Filter 2: follower count check removed/relaxed ──
+	// (CopyTradingCount check removed to ensure discoverability)
 
 	// ── Filter 3: trade count in range (not a one-hit wonder, not a bot) ──
 	totalTrades := d.TotalTrades2
@@ -336,8 +335,8 @@ func (f *Finder) evaluateWallet(ctx context.Context, wallet string) (Candidate, 
 		return Candidate{}, false, nil
 	}
 
-	// ── Filter 6: must be profitable overall ──
-	if d.TotalPnLUSD <= 0 {
+	// ── Filter 6: must be profitable overall (at least $3,000 over 7 days / 30d) ──
+	if d.TotalPnLUSD < minPnkanUSD {
 		return Candidate{}, false, nil
 	}
 
