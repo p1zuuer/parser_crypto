@@ -30,6 +30,10 @@ type ClusterAlert struct {
 	TimeWindowSeconds int
 	// LeadWallet is the wallet with the highest individual buy in this cluster.
 	LeadWallet string
+	// FiredAt is when the cluster crossed threshold and the alert was emitted.
+	// Used by the backtest replay engine to locate the correct historical
+	// price point for entry simulation; harmless/unused in the live path.
+	FiredAt time.Time
 }
 
 // tokenBucket collects swap events for a single token within the time window.
@@ -159,6 +163,7 @@ func (e *ClusterEngine) ProcessSwap(ev SwapEvent) {
 			TotalVolumeUSD:    totalVolume,
 			TimeWindowSeconds: int(window.Seconds()),
 			LeadWallet:        leadWallet,
+			FiredAt:           ev.Timestamp,
 		}
 		shouldAlert = true
 	}
