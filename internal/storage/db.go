@@ -223,9 +223,9 @@ func (s *Storage) AddSmartWallet(walletAddress, note string) error {
 	return nil
 }
 
-// RemoveSmartWallet deletes a tracked whale by its row ID.
-func (s *Storage) RemoveSmartWallet(id int64) error {
-	_, err := s.db.Exec(`DELETE FROM smart_wallets WHERE id = ?`, id)
+// DeleteWhale deletes a tracked whale by its wallet address.
+func (s *Storage) DeleteWhale(walletAddress string) error {
+	_, err := s.db.Exec(`DELETE FROM smart_wallets WHERE wallet_address = ?`, walletAddress)
 	return err
 }
 

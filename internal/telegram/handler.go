@@ -111,6 +111,8 @@ func (h *WebhookHandler) handleMessage(msg *Message) {
 		h.sendStartMenu(chatID)
 	case strings.HasPrefix(text, "/addwhale"):
 		h.handleAddWhaleCommand(chatID, text)
+	case strings.HasPrefix(text, "/delwhale"):
+		h.handleDelWhaleCommand(chatID, text)
 	case text == "/whales":
 		h.sendWhalesMenu(chatID)
 	case text == "/clusters":
@@ -277,7 +279,7 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 		}
 		sb.WriteString("\n")
 		rows = append(rows, []InlineKeyboardButton{
-			{Text: "🗑 " + shortLabel(w.WalletAddress), CallbackData: fmt.Sprintf("cb:whale:rm:%d", w.ID)},
+			{Text: "🗑 Delete " + shortLabel(w.WalletAddress), CallbackData: fmt.Sprintf("cb:whale:delete:%s", w.WalletAddress)},
 		})
 	}
 	rows = append(rows, []InlineKeyboardButton{addBtn})
@@ -385,18 +387,34 @@ func (h *WebhookHandler) handleWhalePrompt(chatID int64, msgID int) {
 }
 
 func (h *WebhookHandler) handleRemoveWhale(chatID int64, msgID int, data string) {
-	parts := strings.Split(data, ":")
-	if len(parts) < 3 {
+	parts := strings.SplitN(data, ":", 4)
+	if len(parts) < 4 {
 		return
 	}
-	id, err := strconv.ParseInt(parts[2], 10, 64)
-	if err != nil {
-		return
-	}
-	if err := h.storage.RemoveSmartWallet(id); err != nil {
-		log.Printf("[HANDLER] RemoveSmartWallet %d: %v", id, err)
+	addr := parts[3]
+	if err := h.storage.DeleteWhale(addr); err != nil {
+		log.Printf("[HANDLER] DeleteWhale %s: %v", addr, err)
 	}
 	h.editWhalesMenu(chatID, msgID)
+}
+
+func (h *WebhookHandler) handleDelWhaleCommand(chatID int64, text string) {
+	parts := strings.Fields(text)
+	if len(parts) < 2 {
+		h.client.SendMessage(chatID, "Usage: /delwhale &lt;address&gt;")
+		return
+	}
+	addr := parts[1]
+	if err := h.storage.DeleteWhale(addr); err != nil {
+		log.Printf("[HANDLER] DeleteWhale command %s: %v", addr, err)
+		h.client.SendMessage(chatID, "❌ Failed to delete whale address.")
+		return
+	}
+	h.client.SendMessageWithKeyboard(chatID, fmt.Sprintf("✅ Whale deleted:\n<code>%s</code>", html.EscapeString(addr)), &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{{Text: "🐋 View Whales", CallbackData: "cb:whales"}},
+		},
+	})
 }
 
 // ── Sniper Settings ────────────────────────────────────────────────────────────
@@ -545,7 +563,7 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 		h.handleFindWhales(chatID, msgID)
 	case data == "cb:settings":
 		h.editSettingsMenu(chatID, msgID)
-	case strings.HasPrefix(data, "cb:whale:rm:"):
+	case strings.HasPrefix(data, "cb:whale:rm:") || strings.HasPrefix(data, "cb:whale:delete:"):
 		h.handleRemoveWhale(chatID, msgID, data)
 	case data == "cb:whale:prompt":
 		h.handleWhalePrompt(chatID, msgID)
