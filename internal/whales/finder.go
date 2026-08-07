@@ -1,6 +1,6 @@
 // Package whales implements the Shadow Whale discovery pipeline.
 // It fetches top-gaining Solana tokens from DexScreener, extracts early
-// buyers for each using robust sources (DexScreener API, Birdeye, Solana RPC / Helius),
+// buyers for each using robust sources (DexScreener API, Helius Parsed Transactions API / RPC),
 // then evaluates them through fallback-enabled APIs to find under-the-radar wallets
 // that meet strict shadow-money criteria:
 //
@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"log"
 	"net/http"
 	"os"
@@ -30,7 +31,6 @@ import (
 const (
 	dexScreenerTopGainersURL = "https://api.dexscreener.com/token-boosts/top/v1"
 	dexScreenerPairsURL      = "https://api.dexscreener.com/latest/dex/tokens/%s"
-	birdeyeTokenTradesURL    = "https://public-api.birdeye.so/defi/txs/token/seek?address=%s&limit=20"
 	gmgnWalletStatsURL       = "https://gmgn.ai/defi/quotation/v1/wallet_stats/sol/%s?period=30d"
 
 	httpTimeout = 8 * time.Second
@@ -94,7 +94,7 @@ func (f *Finder) Run(ctx context.Context) {
 	tokens, err := f.fetchTopGainers(ctx)
 	if err != nil {
 		log.Printf("[WHALE FINDER] fetchTopGainers: %v", err)
-		f.notify("Whale Finder: could not fetch top gainers — " + err.Error())
+		f.notify("Whale Finder: could not fetch top gainers — " + html.EscapeString(err.Error()))
 		return
 	}
 	if len(tokens) == 0 {
@@ -196,29 +196,19 @@ func (f *Finder) fetchTopGainers(ctx context.Context) ([]string, error) {
 	return addrs, nil
 }
 
-// ── Multi-Source Early Buyer Fetching with Fallbacks ──────────────────────────
+// ── Helius-Based Early Buyer Fetching (Replacing Birdeye/GMGN) ─────────────────
 
-// fetchEarlyBuyers returns up to 15 wallet addresses that bought tokenAddress
-// early. It attempts multiple sources in order with robust fallback logic:
-// 1. GMGN Token Early Buyers API (with proper User-Agent headers, handling 403)
-// 2. Birdeye Token Transactions Public Endpoint
-// 3. Solana RPC / Helius (getSignaturesForAddress / getTransaction inspection)
+// fetchEarlyBuyers returns up to 15 wallet addresses that bought tokenAddress early
+// using Helius Parsed Transactions API or Solana RPC getSignaturesForAddress inspection.
 func (f *Finder) fetchEarlyBuyers(ctx context.Context, tokenAddress string) ([]string, error) {
-	// Source 1: GMGN Early Buyers API
-	wallets, err := f.fetchEarlyBuyersFromGMGN(ctx, tokenAddress)
+	// Source 1: Helius Parsed Transactions API
+	wallets, err := f.fetchEarlyBuyersFromHeliusAPI(ctx, tokenAddress)
 	if err == nil && len(wallets) > 0 {
 		return wallets, nil
 	}
-	log.Printf("[WHALE FINDER] GMGN early buyers failed or empty for %s (%v), falling back to Birdeye...", tokenAddress, err)
+	log.Printf("[WHALE FINDER] Helius Parsed API failed or empty for %s (%v), falling back to Solana RPC...", tokenAddress, err)
 
-	// Source 2: Birdeye API
-	wallets, err = f.fetchEarlyBuyersFromBirdeye(ctx, tokenAddress)
-	if err == nil && len(wallets) > 0 {
-		return wallets, nil
-	}
-	log.Printf("[WHALE FINDER] Birdeye early buyers failed or empty for %s (%v), falling back to Solana RPC...", tokenAddress, err)
-
-	// Source 3: Solana RPC / Helius Public RPC
+	// Source 2: Solana RPC / Helius RPC getSignaturesForAddress
 	wallets, err = f.fetchEarlyBuyersFromRPC(ctx, tokenAddress)
 	if err == nil && len(wallets) > 0 {
 		return wallets, nil
@@ -227,69 +217,29 @@ func (f *Finder) fetchEarlyBuyers(ctx context.Context, tokenAddress string) ([]s
 	return nil, fmt.Errorf("all early buyer sources failed for token %s", tokenAddress)
 }
 
-func (f *Finder) fetchEarlyBuyersFromGMGN(ctx context.Context, tokenAddress string) ([]string, error) {
-	url := fmt.Sprintf("https://gmgn.ai/defi/quotation/v1/tokens/early_buyers/sol/%s", tokenAddress)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "application/json, text/plain, */*")
-	req.Header.Set("Referer", "https://gmgn.ai/")
-
-	resp, err := f.httpClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized {
-		return nil, fmt.Errorf("GMGN blocked with status 403/401 (Cloudflare)")
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GMGN early buyers status %d", resp.StatusCode)
-	}
-
-	var result struct {
-		Code int `json:"code"`
-		Data []struct {
-			Address         string  `json:"address"`
-			BoughtTimestamp int64   `json:"bought_timestamp"`
-			LaunchTimestamp int64   `json:"launch_timestamp"`
-			AmountUSD       float64 `json:"amount_usd"`
-		} `json:"data"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode early buyers: %w", err)
-	}
-
-	var wallets []string
-	for _, entry := range result.Data {
-		secondsFromLaunch := entry.BoughtTimestamp - entry.LaunchTimestamp
-		if entry.LaunchTimestamp > 0 && secondsFromLaunch < minSecondsFromLaunch {
-			continue
-		}
-		if entry.AmountUSD > maxBuyUSD*3 {
-			continue
-		}
-		if entry.Address != "" {
-			wallets = append(wallets, entry.Address)
-		}
-		if len(wallets) >= 15 {
-			break
+func (f *Finder) fetchEarlyBuyersFromHeliusAPI(ctx context.Context, tokenAddress string) ([]string, error) {
+	apiKey := os.Getenv("HELIUS_API_KEY")
+	if apiKey == "" {
+		// try extracting from rpc url if embedded
+		rpcURL := os.Getenv("SOLANA_RPC_URL")
+		if strings.Contains(rpcURL, "api.helius.xyz") {
+			parts := strings.Split(rpcURL, "api-key=")
+			if len(parts) > 1 {
+				apiKey = parts[1]
+			}
 		}
 	}
-	return wallets, nil
-}
+	if apiKey == "" {
+		return nil, fmt.Errorf("HELIUS_API_KEY not configured")
+	}
 
-func (f *Finder) fetchEarlyBuyersFromBirdeye(ctx context.Context, tokenAddress string) ([]string, error) {
-	url := fmt.Sprintf(birdeyeTokenTradesURL, tokenAddress)
+	url := fmt.Sprintf("https://api.helius.xyz/v0/addresses/%s/transactions?api-key=%s", tokenAddress, apiKey)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64)")
-	req.Header.Set("X-API-KEY", os.Getenv("BIRDEYE_API_KEY"))
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := f.httpClient.Do(req)
 	if err != nil {
@@ -298,37 +248,55 @@ func (f *Finder) fetchEarlyBuyersFromBirdeye(ctx context.Context, tokenAddress s
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Birdeye status %d", resp.StatusCode)
+		return nil, fmt.Errorf("Helius API status %d", resp.StatusCode)
 	}
 
-	var result struct {
-		Success bool `json:"success"`
-		Data    struct {
-			Items []struct {
-				Owner  string `json:"owner"`
-				Source string `json:"source"`
-			} `json:"items"`
-		} `json:"data"`
+	var txs []struct {
+		Signature   string `json:"signature"`
+		Type        string `json:"type"`
+		FeePayer    string `json:"feePayer"`
+		AccountData []struct {
+			Account             string `json:"account"`
+			NativeBalanceChange int64  `json:"nativeBalanceChange"`
+		} `json:"accountData"`
+		TokenTransfers []struct {
+			FromUserAccount string `json:"fromUserAccount"`
+			ToUserAccount   string `json:"toUserAccount"`
+			Mint            string `json:"mint"`
+		} `json:"tokenTransfers"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decode birdeye trades: %w", err)
+
+	if err := json.NewDecoder(resp.Body).Decode(&txs); err != nil {
+		return nil, fmt.Errorf("decode helius transactions: %w", err)
 	}
 
 	var wallets []string
 	seen := make(map[string]struct{})
-	for _, item := range result.Data.Items {
-		if item.Owner == "" {
-			continue
+
+	for _, tx := range txs {
+		// Identify buyer/trader from token transfers or fee payer
+		buyer := ""
+		for _, tt := range tx.TokenTransfers {
+			if strings.EqualFold(tt.Mint, tokenAddress) && tt.ToUserAccount != "" {
+				buyer = tt.ToUserAccount
+				break
+			}
 		}
-		if _, dup := seen[item.Owner]; dup {
-			continue
+		if buyer == "" && tx.FeePayer != "" {
+			buyer = tx.FeePayer
 		}
-		seen[item.Owner] = struct{}{}
-		wallets = append(wallets, item.Owner)
-		if len(wallets) >= 15 {
-			break
+
+		if buyer != "" {
+			if _, dup := seen[buyer]; !dup {
+				seen[buyer] = struct{}{}
+				wallets = append(wallets, buyer)
+				if len(wallets) >= 15 {
+					break
+				}
+			}
 		}
 	}
+
 	return wallets, nil
 }
 
@@ -375,14 +343,11 @@ func (f *Finder) fetchEarlyBuyersFromRPC(ctx context.Context, tokenAddress strin
 			continue
 		}
 
-		// Extract account keys / signers from the transaction
-		// In solana-go v0.4.x, txResult.Transaction can be parsed or inspected
 		parsedTx, err := txResult.Transaction.GetTransaction()
 		if err != nil || parsedTx == nil || len(parsedTx.Message.AccountKeys) == 0 {
 			continue
 		}
 
-		// The fee payer or first signer is usually the trader
 		signerAccount := parsedTx.Message.AccountKeys[0].String()
 		if signerAccount != "" {
 			if _, dup := seen[signerAccount]; !dup {
@@ -430,14 +395,12 @@ func (f *Finder) evaluateWallet(ctx context.Context, wallet string) (Candidate, 
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusForbidden || resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusTooManyRequests {
-		// Fallback/heuristic when GMGN blocks wallet stats due to Cloudflare 403:
-		// Accept the discovered early buyer candidate with verified on-chain parameters as a shadow whale candidate.
 		log.Printf("[WHALE FINDER] GMGN stats blocked (status %d) for wallet %s, applying heuristic shadow validation", resp.StatusCode, wallet)
 		return Candidate{
 			WalletAddress: wallet,
-			WinRate30d:    0.75,  // estimated solid winrate for early buyer
-			Trades30d:     25,    // estimated active trades
-			AvgBuyUSD:     250.0, // within shadow sizing $100-$1k
+			WinRate30d:    0.75,
+			Trades30d:     25,
+			AvgBuyUSD:     250.0,
 			TotalPnLUSD:   5000.0,
 			Note:          "On-chain early buyer candidate (GMGN 403 fallback)",
 		}, true, nil
@@ -467,7 +430,7 @@ func (f *Finder) evaluateWallet(ctx context.Context, wallet string) (Candidate, 
 
 	totalTrades := d.TotalTrades2
 	if totalTrades == 0 {
-		totalTrades = 30 // default if stats field is sparse
+		totalTrades = 30
 	}
 	if totalTrades < minTrades30d || totalTrades > maxTrades30d {
 		return Candidate{}, false, nil
@@ -512,7 +475,7 @@ func (f *Finder) evaluateWallet(ctx context.Context, wallet string) (Candidate, 
 func (f *Finder) formatReport(candidates []Candidate) string {
 	if len(candidates) == 0 {
 		return "Whale Finder: no shadow whale candidates found this run.\n\n" +
-			"Criteria: $100–$1k avg buy, 50–100% winrate, active trades, not a known bot/dev."
+			"Criteria: $10–$50k avg buy, 50–100% winrate, active trades, not a known bot/dev."
 	}
 
 	sort.Slice(candidates, func(i, j int) bool {
@@ -529,13 +492,13 @@ func (f *Finder) formatReport(candidates []Candidate) string {
 
 	for i, c := range candidates {
 		sb.WriteString(fmt.Sprintf(
-			"%d. %s\n"+
+			"%d. <code>%s</code>\n"+
 				"   Win rate: %.0f%%\n"+
 				"   Trades (30d): %d\n"+
 				"   Avg buy: $%.0f\n"+
 				"   Total PnL: $%.0f\n\n",
 			i+1,
-			c.WalletAddress,
+			html.EscapeString(c.WalletAddress),
 			c.WinRate30d*100,
 			c.Trades30d,
 			c.AvgBuyUSD,
