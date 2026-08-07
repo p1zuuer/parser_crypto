@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"smart-cluster-bot/internal/config"
@@ -26,7 +27,12 @@ type WebhookHandler struct {
 	config      *config.Config
 	i18n        *i18n.Bundle
 	engine      *detector.ClusterEngine
-	whaleFinder func() // triggers an on-demand finder run
+	whaleFinder func()
+
+	// awaitingWhaleInput is set to true when the admin taps "➕ Add Whale"
+	// so the next plain-text message is treated as a wallet address input.
+	awaitMu            sync.Mutex
+	awaitingWhaleInput bool
 }
 
 // NewWebhookHandler wires all dependencies, including the live cluster engine
@@ -86,6 +92,20 @@ func (h *WebhookHandler) handleMessage(msg *Message) {
 	chatID := msg.Chat.ID
 	text := strings.TrimSpace(msg.Text)
 
+	// State machine: if the admin tapped "➕ Add Whale", the next
+	// non-command message is treated as a wallet address.
+	h.awaitMu.Lock()
+	waiting := h.awaitingWhaleInput
+	if waiting {
+		h.awaitingWhaleInput = false
+	}
+	h.awaitMu.Unlock()
+
+	if waiting && !strings.HasPrefix(text, "/") {
+		h.handleInlineWhaleAdd(chatID, text)
+		return
+	}
+
 	switch {
 	case text == "/start":
 		h.sendStartMenu(chatID)
@@ -125,9 +145,16 @@ func (h *WebhookHandler) startMenuText() string {
 	if h.config != nil && h.config.AutoBuyEnabled {
 		autoBuyStatus = fmt.Sprintf("On ($%.2f per trade)", h.config.AutoBuyAmountUSD)
 	}
+
+	modeLine := "Mode: 🚀 REAL TRADING"
+	if h.config != nil && h.config.SimulationMode {
+		modeLine = "Mode: 🧪 SIMULATION (no real txs)"
+	}
+
 	return "Solo Sniper Station\n\n" +
 		"Monitoring is active. Choose a module below.\n\n" +
-		"Auto-Buy: " + autoBuyStatus
+		"Auto-Buy: " + autoBuyStatus + "\n" +
+		modeLine
 }
 
 func (h *WebhookHandler) mainMenuKB() *InlineKeyboardMarkup {
@@ -225,10 +252,16 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 	wallets, err := h.storage.GetSmartWallets()
 	header := "Manage Whales\n\n"
 
+	addBtn := InlineKeyboardButton{Text: "➕ Add Whale", CallbackData: "cb:whale:prompt"}
+	backBtn := InlineKeyboardButton{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}
+
 	if err != nil || len(wallets) == 0 {
-		body := header + "No whales tracked yet.\n\nAdd one: /addwhale &lt;address&gt; [note]"
+		body := header + "No whales tracked yet.\n\nTap ➕ Add Whale or use /addwhale &lt;address&gt; [note]"
 		return body, &InlineKeyboardMarkup{
-			InlineKeyboard: [][]InlineKeyboardButton{{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}}},
+			InlineKeyboard: [][]InlineKeyboardButton{
+				{addBtn},
+				{backBtn},
+			},
 		}
 	}
 
@@ -238,17 +271,17 @@ func (h *WebhookHandler) buildWhalesContent() (string, *InlineKeyboardMarkup) {
 
 	var rows [][]InlineKeyboardButton
 	for _, w := range wallets {
-		fmt.Fprintf(&sb, "%s", html.EscapeString(w.WalletAddress))
+		fmt.Fprintf(&sb, "<code>%s</code>", html.EscapeString(w.WalletAddress))
 		if w.Note != "" {
 			fmt.Fprintf(&sb, " — %s", html.EscapeString(w.Note))
 		}
 		sb.WriteString("\n")
 		rows = append(rows, []InlineKeyboardButton{
-			{Text: "🗑 Remove " + shortLabel(w.WalletAddress), CallbackData: fmt.Sprintf("cb:whale:rm:%d", w.ID)},
+			{Text: "🗑 " + shortLabel(w.WalletAddress), CallbackData: fmt.Sprintf("cb:whale:rm:%d", w.ID)},
 		})
 	}
-	sb.WriteString("\nAdd more: /addwhale &lt;address&gt; [note]")
-	rows = append(rows, []InlineKeyboardButton{{Text: "⬅️ Main Menu", CallbackData: "cb:menu"}})
+	rows = append(rows, []InlineKeyboardButton{addBtn})
+	rows = append(rows, []InlineKeyboardButton{backBtn})
 	return sb.String(), &InlineKeyboardMarkup{InlineKeyboard: rows}
 }
 
@@ -258,20 +291,97 @@ func (h *WebhookHandler) handleAddWhaleCommand(chatID int64, text string) {
 		h.client.SendMessage(chatID, "Usage: /addwhale &lt;address&gt; [note]")
 		return
 	}
-	addr := parts[1]
-	note := strings.Join(parts[2:], " ")
+	h.saveWhaleAddress(chatID, parts[1], strings.Join(parts[2:], " "), 0)
+}
+
+// handleInlineWhaleAdd processes the address the admin typed after tapping
+// "➕ Add Whale". Validates it and saves to the DB.
+func (h *WebhookHandler) handleInlineWhaleAdd(chatID int64, input string) {
+	parts := strings.Fields(input)
+	addr := parts[0]
+	note := strings.Join(parts[1:], " ")
+	h.saveWhaleAddress(chatID, addr, note, 0)
+}
+
+// saveWhaleAddress validates a Solana address, saves it to the DB, and
+// sends a confirmation. msgID=0 means send a new message; non-zero edits.
+func (h *WebhookHandler) saveWhaleAddress(chatID int64, addr, note string, msgID int) {
+	if !isValidSolanaAddress(addr) {
+		msg := fmt.Sprintf(
+			"❌ Invalid Solana address:\n<code>%s</code>\n\n"+
+				"A valid Solana address is 32–44 base58 characters.\n"+
+				"Please try again or tap ⬅️ to cancel.",
+			html.EscapeString(addr),
+		)
+		kb := &InlineKeyboardMarkup{
+			InlineKeyboard: [][]InlineKeyboardButton{
+				{{Text: "⬅️ Back to Whales", CallbackData: "cb:whales"}},
+			},
+		}
+		if msgID != 0 {
+			h.client.EditMessageText(chatID, msgID, msg, kb)
+		} else {
+			h.client.SendMessageWithKeyboard(chatID, msg, kb)
+		}
+		return
+	}
+	if note == "" {
+		note = "Manually added"
+	}
 	if err := h.storage.AddSmartWallet(addr, note); err != nil {
 		log.Printf("[HANDLER] AddSmartWallet: %v", err)
-		h.client.SendMessage(chatID, "Failed to add whale.")
+		h.client.SendMessage(chatID, "❌ Failed to save whale. Try again.")
 		return
 	}
 	reply := fmt.Sprintf(
-		"Whale added.\n\n%s\nNote: %s",
-		html.EscapeString(addr), html.EscapeString(or(note, "—")),
+		"✅ Whale added!\n\n<code>%s</code>\nNote: %s",
+		html.EscapeString(addr), html.EscapeString(note),
 	)
 	h.client.SendMessageWithKeyboard(chatID, reply, &InlineKeyboardMarkup{
-		InlineKeyboard: [][]InlineKeyboardButton{{{Text: "🐋 View Whales", CallbackData: "cb:whales"}}},
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{{Text: "🐋 View Whales", CallbackData: "cb:whales"}},
+		},
 	})
+}
+
+// isValidSolanaAddress checks that addr is a plausible base58 Solana public
+// key — 32 to 44 characters, containing only base58 alphabet characters.
+// This is a format check only, not a cryptographic verification.
+func isValidSolanaAddress(addr string) bool {
+	const base58Alphabet = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+	if len(addr) < 32 || len(addr) > 44 {
+		return false
+	}
+	for _, c := range addr {
+		if !strings.ContainsRune(base58Alphabet, c) {
+			return false
+		}
+	}
+	return true
+}
+
+// handleWhalePrompt is triggered by the "➕ Add Whale" inline button.
+// It edits the current message to show instructions and sets the awaiting
+// state so the next plain-text message from the admin is treated as an address.
+func (h *WebhookHandler) handleWhalePrompt(chatID int64, msgID int) {
+	h.awaitMu.Lock()
+	h.awaitingWhaleInput = true
+	h.awaitMu.Unlock()
+
+	prompt := "🐋 <b>Add Whale</b>\n\n" +
+		"Send me the Solana wallet address you want to track.\n" +
+		"You can optionally add a note after the address:\n\n" +
+		"<code>7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU my whale note</code>\n\n" +
+		"Type the address now, or tap Cancel."
+
+	kb := &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{{Text: "❌ Cancel", CallbackData: "cb:whale:cancel"}},
+		},
+	}
+	if err := h.client.EditMessageText(chatID, msgID, prompt, kb); err != nil {
+		log.Printf("[HANDLER] handleWhalePrompt edit %d/%d: %v", chatID, msgID, err)
+	}
 }
 
 func (h *WebhookHandler) handleRemoveWhale(chatID int64, msgID int, data string) {
@@ -437,6 +547,13 @@ func (h *WebhookHandler) handleCallback(cb *CallbackQuery) {
 		h.editSettingsMenu(chatID, msgID)
 	case strings.HasPrefix(data, "cb:whale:rm:"):
 		h.handleRemoveWhale(chatID, msgID, data)
+	case data == "cb:whale:prompt":
+		h.handleWhalePrompt(chatID, msgID)
+	case data == "cb:whale:cancel":
+		h.awaitMu.Lock()
+		h.awaitingWhaleInput = false
+		h.awaitMu.Unlock()
+		h.editWhalesMenu(chatID, msgID)
 	case strings.HasPrefix(data, "cb:whale:add:"):
 		addr := strings.TrimPrefix(data, "cb:whale:add:")
 		if err := h.storage.AddSmartWallet(addr, "Added from alert"); err != nil {

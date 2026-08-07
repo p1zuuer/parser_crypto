@@ -83,6 +83,9 @@ func checkRugCheck(ctx context.Context, baseURL, chain, address string) (string,
 		return "RugCheck: unverified (parse error)", false, nil
 	}
 
+	if strings.TrimSpace(report.MintAuthority) != "" {
+		return "RugCheck: FAILED — mint authority enabled (tokens can be minted)", true, nil
+	}
 	if strings.TrimSpace(report.FreezeAuthority) != "" {
 		return "RugCheck: FAILED — freeze authority enabled", true, nil
 	}
@@ -286,13 +289,22 @@ func broadcastAlert(ctx context.Context, client *Client, store *storage.Storage,
 	}
 }
 
-// attemptAutoBuy runs the configured AutoBuyer against the alert's token and
-// returns a human-readable result line to append to the Telegram alert.
-// Never panics or blocks the broadcaster beyond autoBuyTimeout.
+// attemptAutoBuy executes or simulates a buy depending on cfg.SimulationMode.
+// Returns a human-readable result line to append to the Telegram alert.
 func attemptAutoBuy(ctx context.Context, buyer trading.AutoBuyer, seller *trading.Seller, cfg *config.Config, alert detector.ClusterAlert) string {
 	if buyer == nil {
 		return ""
 	}
+
+	// Simulation mode: record a paper trade, no real transaction.
+	if cfg.SimulationMode {
+		if seller != nil {
+			seller.RecordSimulatedBuy(ctx, alert.TokenAddress, alert.TokenSymbol, alert.Chain, cfg.AutoBuyAmountUSD)
+		}
+		log.Printf("[AUTOBUY] [SIMULATION] paper trade recorded for %s", alert.TokenAddress)
+		return fmt.Sprintf("[SIMULATION] Paper trade recorded — $%.2f position opened (no real tx)", cfg.AutoBuyAmountUSD)
+	}
+
 	buyCtx, cancel := context.WithTimeout(ctx, autoBuyTimeout)
 	defer cancel()
 
@@ -303,7 +315,6 @@ func attemptAutoBuy(ctx context.Context, buyer trading.AutoBuyer, seller *tradin
 			return fmt.Sprintf("Auto-Buy: FAILED — %v", err)
 		}
 		log.Printf("[AUTOBUY] success for %s: tx %s", alert.TokenAddress, sig)
-		// Record the position so the seller goroutine can monitor TP/SL.
 		if seller != nil {
 			seller.RecordBuy(ctx, alert.TokenAddress, alert.TokenSymbol, alert.Chain, sig, cfg.AutoBuyAmountUSD)
 		}
@@ -315,6 +326,44 @@ func attemptAutoBuy(ctx context.Context, buyer trading.AutoBuyer, seller *tradin
 		return fmt.Sprintf("Auto-Buy: FAILED — %v", err)
 	}
 	return "Auto-Buy: SUCCESS"
+}
+
+// SendWhaleActivityAlert fires a Telegram notification when a tracked whale
+// executes a buy detected via the Helius webhook. Called from helius.go after
+// a swap event arrives from a known smart wallet.
+func SendWhaleActivityAlert(client *Client, adminChatID int64, whaleAddr, tokenSymbol, tokenAddress, chain string, amountUSD float64) {
+	dex := "https://dexscreener.com/solana/" + tokenAddress
+	gmgn := "https://gmgn.ai/sol/token/" + tokenAddress
+
+	msg := fmt.Sprintf(
+		"🐋 Whale Activity Alert\n\n"+
+			"Wallet: <code>%s</code>\n"+
+			"Bought: <b>%s</b>\n"+
+			"Chain: %s\n"+
+			"Amount: ~$%.0f\n\n"+
+			"Contract:\n<code>%s</code>",
+		html.EscapeString(whaleAddr),
+		html.EscapeString(or(tokenSymbol, "Unknown")),
+		html.EscapeString(chain),
+		amountUSD,
+		tokenAddress,
+	)
+
+	kb := &InlineKeyboardMarkup{
+		InlineKeyboard: [][]InlineKeyboardButton{
+			{
+				{Text: "📊 DexScreener", URL: dex},
+				{Text: "📈 GMGN", URL: gmgn},
+			},
+			{
+				{Text: "🐋 Add Whale", CallbackData: "cb:whale:add:" + whaleAddr},
+			},
+		},
+	}
+
+	if err := client.SendMessageWithKeyboard(adminChatID, msg, kb); err != nil {
+		log.Printf("[WHALE ALERT] send failed for %s: %v", whaleAddr, err)
+	}
 }
 
 // StartDailyDigest schedules a daily summary message sent to the admin at 09:00 UTC.

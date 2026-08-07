@@ -61,6 +61,27 @@ func (s *Storage) migratePositions() error {
 	return nil
 }
 
+// OpenSimulatedPosition records a paper trade. Identical to OpenPosition
+// but forces status = 'simulated' so the seller can track TP/SL with real
+// prices while never touching the RPC layer.
+func (s *Storage) OpenSimulatedPosition(tokenAddress, tokenSymbol, chain string,
+	buyAmountUSD, entryPriceUSD, takeProfitPct, stopLossPct float64) (int64, error) {
+
+	res, err := s.db.Exec(
+		`INSERT INTO positions
+		 (token_address, token_symbol, chain, entry_tx_hash, entry_time_utc,
+		  buy_amount_usd, entry_price_usd, take_profit_pct, stop_loss_pct, status)
+		 VALUES (?, ?, ?, 'simulation', ?, ?, ?, ?, ?, 'simulated')`,
+		tokenAddress, tokenSymbol, chain, time.Now().UTC(),
+		buyAmountUSD, entryPriceUSD, takeProfitPct, stopLossPct,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("storage: open simulated position: %w", err)
+	}
+	id, _ := res.LastInsertId()
+	return id, nil
+}
+
 // OpenPosition records a newly executed buy. entryPriceUSD may be 0 if the
 // fill price isn't available yet — the seller will populate it later.
 func (s *Storage) OpenPosition(tokenAddress, tokenSymbol, chain, entryTxHash string,
@@ -120,7 +141,7 @@ func (s *Storage) GetOpenPositions() ([]Position, error) {
 		        take_profit_pct, stop_loss_pct, status, exit_tx_hash,
 		        exit_time_utc, pnl_usd
 		 FROM positions
-		 WHERE status IN ('open', 'tp_partial')
+		 WHERE status IN ('open', 'tp_partial', 'simulated')
 		 ORDER BY entry_time_utc DESC`,
 	)
 	if err != nil {

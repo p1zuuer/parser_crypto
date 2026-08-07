@@ -23,7 +23,6 @@ import (
 
 	"smart-cluster-bot/internal/config"
 	"smart-cluster-bot/internal/detector"
-	"smart-cluster-bot/internal/dex"
 	"smart-cluster-bot/internal/i18n"
 	"smart-cluster-bot/internal/storage"
 	"smart-cluster-bot/internal/telegram"
@@ -121,7 +120,7 @@ func main() {
 			log.Printf("WARNING: auto-buy requested but wallet init failed, falling back to Noop: %v", err)
 		} else {
 			buyer = jupiterBuyer
-			seller = trading.NewSeller(jupiterBuyer, db, notify)
+			seller = trading.NewSeller(jupiterBuyer, db, notify, cfg.SimulationMode)
 			seller.Start(ctx)
 			log.Printf("INFO: auto-buy ENABLED — $%.2f per Solana cluster, TP +%.0f%% / SL -%.0f%%",
 				cfg.AutoBuyAmountUSD, trading.DefaultTakeProfitPct, trading.DefaultStopLossPct)
@@ -145,7 +144,15 @@ func main() {
 
 	// ── 10. HTTP routes ─────────────────────────────────────────────────────────
 	webhookHandler := telegram.NewWebhookHandler(tgClient, db, cfg, bundle, engine, onDemandFinder)
-	heliusHandler := dex.NewHeliusHandler(engine, cfg.HeliusWebhookSecret)
+	heliusHandler := detector.NewHeliusHandler(
+		engine,
+		cfg.HeliusWebhookSecret,
+		func(addr string) (bool, error) { return db.IsSmartWallet(addr) },
+		func(wallet, token, chain string, amountUSD float64) error {
+			telegram.SendWhaleActivityAlert(tgClient, cfg.AdminChatID, wallet, "", token, chain, amountUSD)
+			return nil
+		},
+	)
 
 	mux := http.NewServeMux()
 	mux.Handle("/webhook", webhookHandler)

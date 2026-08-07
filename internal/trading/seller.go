@@ -54,20 +54,22 @@ type PositionStore interface {
 // automatically. It runs as a background goroutine and is safe to construct
 // even when auto-buy is disabled (it simply won't find any positions to monitor).
 type Seller struct {
-	buyer      *JupiterBuyer // reused for sell execution (same keypair/RPC)
-	store      PositionStore
-	httpClient *http.Client
-	notify     func(msg string) // sends result to Telegram
+	buyer          *JupiterBuyer // reused for sell execution (same keypair/RPC)
+	store          PositionStore
+	httpClient     *http.Client
+	notify         func(msg string) // sends result to Telegram
+	simulationMode bool
 }
 
 // NewSeller constructs a Seller. buyer may be nil — if so, Seller.Start
 // still runs but will log errors rather than executing any transactions.
-func NewSeller(buyer *JupiterBuyer, store PositionStore, notify func(msg string)) *Seller {
+func NewSeller(buyer *JupiterBuyer, store PositionStore, notify func(msg string), simulationMode bool) *Seller {
 	return &Seller{
-		buyer:      buyer,
-		store:      store,
-		httpClient: &http.Client{Timeout: 8 * time.Second},
-		notify:     notify,
+		buyer:          buyer,
+		store:          store,
+		httpClient:     &http.Client{Timeout: 8 * time.Second},
+		notify:         notify,
+		simulationMode: simulationMode,
 	}
 }
 
@@ -97,13 +99,11 @@ func (s *Seller) Start(ctx context.Context) {
 // RecordBuy creates a position record after a successful auto-buy. Call this
 // immediately after JupiterBuyer.BuyTokenWithResult returns a tx signature.
 func (s *Seller) RecordBuy(ctx context.Context, tokenAddress, tokenSymbol, chain, txHash string, amountUSD float64) {
-	// Fetch current price to use as entry price
 	entryPrice, err := s.fetchPriceUSD(ctx, tokenAddress)
 	if err != nil {
 		log.Printf("[SELLER] could not fetch entry price for %s: %v", tokenAddress, err)
-		entryPrice = 0 // will be left as 0; seller can still track on % basis
+		entryPrice = 0
 	}
-
 	id, err := s.store.OpenPosition(
 		tokenAddress, tokenSymbol, chain, txHash,
 		amountUSD, entryPrice,
@@ -114,6 +114,41 @@ func (s *Seller) RecordBuy(ctx context.Context, tokenAddress, tokenSymbol, chain
 		return
 	}
 	log.Printf("[SELLER] position %d opened: %s @ $%.6f", id, tokenAddress, entryPrice)
+}
+
+// RecordSimulatedBuy records a paper trade position. The TP/SL monitor tracks
+// it using real Jupiter prices and sends [SIMULATION]-tagged alerts, but no
+// on-chain transaction is ever signed or broadcast.
+func (s *Seller) RecordSimulatedBuy(ctx context.Context, tokenAddress, tokenSymbol, chain string, amountUSD float64) {
+	entryPrice, err := s.fetchPriceUSD(ctx, tokenAddress)
+	if err != nil {
+		log.Printf("[SELLER] could not fetch entry price for sim %s: %v", tokenAddress, err)
+		entryPrice = 0
+	}
+	// PositionStore is the interface — call OpenSimulatedPosition via type assertion
+	// if the store supports it, otherwise fall back to OpenPosition with 'simulated' status.
+	type simStore interface {
+		OpenSimulatedPosition(tokenAddress, tokenSymbol, chain string, buyAmountUSD, entryPriceUSD, takeProfitPct, stopLossPct float64) (int64, error)
+	}
+	var id int64
+	if ss, ok := s.store.(simStore); ok {
+		id, err = ss.OpenSimulatedPosition(
+			tokenAddress, tokenSymbol, chain,
+			amountUSD, entryPrice,
+			DefaultTakeProfitPct, DefaultStopLossPct,
+		)
+	} else {
+		id, err = s.store.OpenPosition(
+			tokenAddress, tokenSymbol, chain, "simulation",
+			amountUSD, entryPrice,
+			DefaultTakeProfitPct, DefaultStopLossPct,
+		)
+	}
+	if err != nil {
+		log.Printf("[SELLER] OpenSimulatedPosition %s: %v", tokenAddress, err)
+		return
+	}
+	log.Printf("[SELLER] [SIMULATION] position %d opened: %s @ $%.6f", id, tokenAddress, entryPrice)
 }
 
 // checkPositions fetches all open positions, gets current prices, and fires
@@ -192,27 +227,40 @@ func (s *Seller) checkOne(ctx context.Context, p storage.Position) {
 // executeSell sells sellPct% of the position, records the result, and
 // notifies the admin. sellPct should be 50 or 100.
 func (s *Seller) executeSell(ctx context.Context, p storage.Position, reason string, sellPct int, currentPrice, pctChange float64) {
-	if s.buyer == nil {
-		log.Printf("[SELLER] no buyer configured — cannot execute sell for position %d", p.ID)
-		return
-	}
-
-	// Estimate how many tokens we hold. This is approximate — a production
-	// system should read the actual token balance from the RPC node.
-	// Here: tokenQty = buyAmountUSD / entryPriceUSD * (sellPct/100)
 	tokenQtyUSD := p.BuyAmountUSD * float64(sellPct) / 100.0
-
-	// For the TP partial, PnL on the sold portion:
 	realizedPnL := tokenQtyUSD * (pctChange / 100.0)
 
-	txHash, err := s.executeSellTx(ctx, p.TokenAddress, tokenQtyUSD, currentPrice)
-	if err != nil {
-		log.Printf("[SELLER] executeSellTx %s: %v", p.TokenAddress, err)
-		s.notify(fmt.Sprintf(
-			"SELL FAILED: %s\nReason: %s (%.1f%%)\nError: %v",
-			p.TokenSymbol, strings.ToUpper(reason), pctChange, err,
-		))
-		return
+	emoji := "🟢"
+	action := "TAKE PROFIT"
+	if reason == "sl" {
+		emoji = "🔴"
+		action = "STOP LOSS"
+	}
+	simTag := ""
+	if s.simulationMode || p.Status == "simulated" {
+		simTag = "[SIMULATION] "
+	}
+
+	var txHash string
+
+	if s.simulationMode || p.Status == "simulated" {
+		// Simulation: skip the RPC entirely, use a placeholder tx hash.
+		txHash = "simulation"
+	} else {
+		if s.buyer == nil {
+			log.Printf("[SELLER] no buyer configured — cannot execute sell for position %d", p.ID)
+			return
+		}
+		var err error
+		txHash, err = s.executeSellTx(ctx, p.TokenAddress, tokenQtyUSD, currentPrice)
+		if err != nil {
+			log.Printf("[SELLER] executeSellTx %s: %v", p.TokenAddress, err)
+			s.notify(fmt.Sprintf(
+				"%sSELL FAILED: %s\nReason: %s (%.1f%%)\nError: %v",
+				simTag, p.TokenSymbol, strings.ToUpper(reason), pctChange, err,
+			))
+			return
+		}
 	}
 
 	var dbErr error
@@ -225,31 +273,27 @@ func (s *Seller) executeSell(ctx context.Context, p storage.Position, reason str
 		log.Printf("[SELLER] update position %d: %v", p.ID, dbErr)
 	}
 
-	emoji := "🟢"
-	if reason == "sl" {
-		emoji = "🔴"
-	}
-	action := "TAKE PROFIT"
-	if reason == "sl" {
-		action = "STOP LOSS"
+	txLine := "Tx: " + txHash
+	if txHash == "simulation" {
+		txLine = "(paper trade — no real transaction)"
 	}
 
 	s.notify(fmt.Sprintf(
-		"%s %s TRIGGERED\n\n"+
+		"%s%s %s TRIGGERED\n\n"+
 			"Token: %s\n"+
 			"Change: %+.1f%%\n"+
 			"Sold: %d%% of position\n"+
 			"Realized PnL: $%.2f\n"+
-			"Tx: %s",
-		emoji, action,
+			"%s",
+		simTag, emoji, action,
 		p.TokenSymbol,
 		pctChange,
 		sellPct,
 		realizedPnL,
-		txHash,
+		txLine,
 	))
 
-	log.Printf("[SELLER] %s executed for %s: %.1f%% change, tx %s", action, p.TokenSymbol, pctChange, txHash)
+	log.Printf("[SELLER] %s%s for %s: %.1f%% change", simTag, action, p.TokenSymbol, pctChange)
 }
 
 // executeSellTx gets a Jupiter sell quote and executes it. tokenQtyUSD is

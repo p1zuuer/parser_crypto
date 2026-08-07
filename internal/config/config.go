@@ -43,6 +43,10 @@ type Config struct {
 	// HeliusWebhookSecret, if set, is checked against the "Authorization"
 	// header on incoming Helius webhook requests to reject unauthenticated calls.
 	HeliusWebhookSecret string
+	// SimulationMode, when true, records trades in the DB and tracks TP/SL
+	// using real prices but never signs or broadcasts real transactions.
+	// Default: true — must be explicitly set to false to go live.
+	SimulationMode bool
 }
 
 const (
@@ -112,6 +116,10 @@ func Load() (*Config, error) {
 	// Auto-buy requires an explicit opt-in AND a private key — either alone
 	// is not enough to start signing real transactions.
 	cfg.AutoBuyEnabled = strings.EqualFold(os.Getenv("AUTO_BUY_ENABLED"), "true") && cfg.SolPrivateKey != ""
+
+	// SimulationMode defaults to TRUE for safety — you must explicitly set
+	// SIMULATION_MODE=false to execute real on-chain transactions.
+	cfg.SimulationMode = !strings.EqualFold(os.Getenv("SIMULATION_MODE"), "false")
 
 	// Normalise RenderURL: strip trailing slash so callers can always do cfg.RenderURL+"/app".
 	cfg.RenderURL = strings.TrimSuffix(cfg.RenderURL, "/")

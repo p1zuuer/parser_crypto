@@ -1,7 +1,6 @@
-// Package dex adapts real-time on-chain data feeds into the detector engine.
-// The current adapter (Helius) consumes Helius' "Enhanced Transactions"
-// webhook format for Solana SWAP events.
-package dex
+// Package detector implements the cluster detection engine that watches swap
+// events and flags volume clusters. It also includes the Helius webhook handler.
+package detector
 
 import (
 	"encoding/json"
@@ -9,8 +8,6 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"smart-cluster-bot/internal/detector"
 )
 
 // HeliusHandler is an http.Handler that receives Helius Enhanced Transaction
@@ -18,7 +15,7 @@ import (
 // detection engine as SwapEvents. It also fires whale activity alerts when
 // a tracked smart-wallet address appears as the swapper.
 type HeliusHandler struct {
-	engine       *detector.ClusterEngine
+	engine       *ClusterEngine
 	sharedSecret string
 	isWhale      func(addr string) (bool, error)
 	alertWhale   func(wallet, token, chain string, amount float64) error
@@ -26,7 +23,7 @@ type HeliusHandler struct {
 
 // NewHeliusHandler wires a Helius webhook receiver to engine.
 // isWhale and alertWhale may be nil — whale alerts are silently skipped when either is unset.
-func NewHeliusHandler(engine *detector.ClusterEngine, sharedSecret string,
+func NewHeliusHandler(engine *ClusterEngine, sharedSecret string,
 	isWhale func(string) (bool, error),
 	alertWhale func(wallet, token, chain string, amount float64) error,
 ) *HeliusHandler {
@@ -159,7 +156,7 @@ func (h *HeliusHandler) processOne(tx heliusTransaction) {
 		}
 	}
 
-	h.engine.ProcessSwap(detector.SwapEvent{
+	h.engine.ProcessSwap(SwapEvent{
 		TokenAddress:  tokenAddress,
 		TokenSymbol:   "",
 		WalletAddress: walletAddress,
